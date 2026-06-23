@@ -1,0 +1,123 @@
+.card {
+  position: absolute;
+  inset: 0;
+  border-radius: 20px;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  will-change: transform;
+  box-shadow:
+    0 2px 4px rgba(0,0,0,0.3),
+    0 8px 16px rgba(0,0,0,0.4),
+    0 20px 40px rgba(0,0,0,0.5);
+  outline: none;
+}
+
+.card:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 20px 40px rgba(0,0,0,0.5);
+}
+
+.photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  user-select: none;
+}
+
+.topGradient {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 120px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.5), transparent);
+  pointer-events: none;
+}
+
+.bottomGradient {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 160px;
+  background: linear-gradient(to top, rgba(0,0,0,0.75), transparent);
+  pointer-events: none;
+}
+
+/* Swipe labels */
+.label {
+  position: absolute;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 8px 18px;
+  border-radius: 10px;
+  border-width: 3px;
+  border-style: solid;
+  pointer-events: none;
+  text-transform: uppercase;
+  backdrop-filter: blur(4px);
+}
+
+.good {
+  top: 48px;
+  left: 24px;
+  color: var(--good);
+  border-color: var(--good);
+  background: var(--good-glow);
+  transform: rotate(-12deg);
+}
+
+.bad {
+  top: 48px;
+  right: 24px;
+  color: var(--bad);
+  border-color: var(--bad);
+  background: var(--bad-glow);
+  transform: rotate(12deg);
+}
+
+.skip {
+  bottom: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: white;
+  border-color: rgba(255,255,255,0.5);
+  background: rgba(255,255,255,0.1);
+  white-space: nowrap;
+}
+
+.back {
+  bottom: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: white;
+  border-color: rgba(255,255,255,0.5);
+  background: rgba(255,255,255,0.1);
+  white-space: nowrap;
+}
+
+/* Bottom metadata */
+.meta {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.metaDate {
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.9);
+}
+
+.metaName {
+  font-size: 11px;
+  color: rgba(255,255,255,0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
