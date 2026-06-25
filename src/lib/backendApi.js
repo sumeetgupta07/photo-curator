@@ -36,6 +36,10 @@ export async function getAllUploads() {
   const d = await backendRequest('/api/uploads/all')
   return d.items
 }
+export async function getDeletedUploads() {
+  const d = await backendRequest('/api/uploads/deleted')
+  return d.items
+}
 export async function retryUpload(uploadId)  { return backendRequest(`/api/uploads/${uploadId}/retry`, { method: 'POST' }) }
 export async function cleanupSession()       { return backendRequest('/api/cleanup', { method: 'POST' }) }
 export async function recordSwipe(ourMediaItemId, decision) {

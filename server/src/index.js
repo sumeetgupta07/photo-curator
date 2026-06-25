@@ -1,8 +1,12 @@
-// index.js — v2.3
+// index.js — v2.5
 // PURPOSE: Photo Curator backend — all Express routes.
-// v2.3: added GET /api/albums — returns Good/Bad/Duplicates summaries
-// (count + cover uploadId) for the album drawer. All other routes unchanged.
-
+// v2.5: deleted-photo detection feature —
+//   - imports verifier.js + node-cron
+//   - triggers runVerificationPass on fresh login (oauth/callback)
+//   - cron job runs runVerificationPassForAllUsers every 2 hours
+//   - new GET /api/uploads/deleted route
+// v2.4: /api/uploads/all queries by google_email for cross-login persistence.
+// v2.3: added GET /api/albums.
 import 'dotenv/config'
 import express from 'express'
 import cookieParser from 'cookie-parser'
@@ -12,7 +16,7 @@ import {
   createUploadRow, getReadyUploads,
   getUploadStatusCounts, getUploadRow, updateUploadStatus,
   getUploadByOurMediaItemId, setSwipeDecision,
-  getUploadIdsBySession, getAlbumSummaries, db,
+  getUploadIdsBySession, getAlbumSummaries, getDeletedUploads, db,
 } from './db.js'
 import { buildAuthUrl, exchangeCodeForTokens, getValidAccessToken } from './google-auth.js'
 import { createPickerSession, getPickerSession, deletePickerSession, fetchPickerItems } from './picker.js'
@@ -20,6 +24,8 @@ import { kickWorkerPool, registerBaseUrl, registerRowContext } from './worker.js
 import { createAlbum, batchAddMediaItems } from './library-upload.js'
 import { ensureThumbDirs, deleteThumbsBulk } from './thumbs.js'
 import { getCachedAlbumId, setCachedAlbumId } from './db.js' 
+import cron from 'node-cron'
+import { runVerificationPass, runVerificationPassForAllUsers } from './verifier.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -72,6 +78,12 @@ app.get('/api/oauth/callback', async (req, res) => {
     saveSession(sessionId, { refreshToken: tokens.refresh_token, accessToken: tokens.access_token, accessTokenExp: now + tokens.expires_in, googleEmail: email })
     res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true, secure: IS_PROD, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 24 * 90 })
     res.redirect('/')
+    // v2.5: trigger verification pass in background after fresh login (don't await)
+    if (email) {
+      setImmediate(() => runVerificationPass(email, getValidAccessToken).catch(err =>
+        console.error('[verifier] login-triggered pass failed:', err.message)
+      ))
+    }
   } catch (err) {
     console.error('[oauth/callback] failed:', err.message)
     res.redirect('/?auth_error=token_exchange_failed')
@@ -199,11 +211,25 @@ app.get('/api/uploads/ready', requireSession, (req, res) => {
 })
 
 app.get('/api/uploads/all', requireSession, (req, res) => {
+  // v2.1: query by google_email (from current session) so photos persist across logout/re-login
+  const session = getSession(req.sessionId)
+  const email = session?.google_email
+  if (!email) return res.json({ items: [] })
   const rows = db.prepare(`
     SELECT * FROM uploads
-    WHERE session_id = ? AND status = 'done' AND our_media_item_id IS NOT NULL AND is_duplicate = 0
+    WHERE google_email = ? AND status = 'done' AND our_media_item_id IS NOT NULL AND is_duplicate = 0
     ORDER BY id ASC
-  `).all(req.sessionId)
+  `).all(email)
+  res.json({ items: rows.map(rowToItem) })
+})
+
+// v2.5: deleted photos — items detected as removed from Google Photos,
+// kept for 15 days then purged from DB automatically by verifier.
+app.get('/api/uploads/deleted', requireSession, (req, res) => {
+  const session = getSession(req.sessionId)
+  const email = session?.google_email
+  if (!email) return res.json({ items: [] })
+  const rows = getDeletedUploads(email)
   res.json({ items: rows.map(rowToItem) })
 })
 
@@ -295,4 +321,13 @@ app.get('/api/swipe-decisions', requireSession, (req, res) => {
   res.json({ decisions: rows })
 })
 
-app.listen(PORT, () => console.log(`[server] Photo Curator backend v2.3 listening on :${PORT}`))
+// v2.5: cron job — verify deleted photos every 2 hours for all active users
+cron.schedule('0 */2 * * *', () => {
+  console.log('[cron] running 2-hourly verification pass')
+  runVerificationPassForAllUsers(getValidAccessToken).catch(err =>
+    console.error('[cron] verification pass failed:', err.message)
+  )
+})
+console.log('[server] cron scheduled: deleted-photo verification every 2 hours')
+
+app.listen(PORT, () => console.log(`[server] Photo Curator backend v2.5 listening on :${PORT}`))

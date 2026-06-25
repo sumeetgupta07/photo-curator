@@ -1,18 +1,15 @@
-// useMediaItems.js — v2.2
+// useMediaItems.js — v2.4
 // PURPOSE: Picker session lifecycle + upload pipeline management.
-// v2.2 changes:
-//   - On mount (authenticated), calls getAllUploads() to restore ALL photos
-//     from the backend DB across sessions — photos now persist until
-//     explicitly cleared, not just within one picker session.
-//   - mapReadyItem now includes swipeDecision for badge display.
-//   - clearAndReset calls backend cleanup before wiping local state.
+// v2.4: fetches /api/uploads/deleted on mount alongside all uploads;
+//   stores result in deletedItems Zustand slice.
+// v2.3: fires dupeToast on duplicate detection during upload polling.
 
 import { useCallback, useEffect, useRef } from 'react'
 import {
   createPickerSession, getPickerSession,
   fetchPickerItems, deletePickerSession,
   startUpload, getUploadStatus, getReadyUploads,
-  getAllUploads, cleanupSession,
+  getAllUploads, getDeletedUploads, cleanupSession,
 } from '../lib/backendApi.js'
 import { savePickerSession, getPickerSession as getStoredPickerSession, clearItemsCache, saveLastItem } from '../lib/storage.js'
 import { PICKER_POLL_MS } from '../lib/config.js'
@@ -43,7 +40,7 @@ export function useMediaItems() {
   const {
     appendItems, setPickerState, setPickerError,
     setView, authState, setUploadStatus,
-    setItems, setSwipeDecisions,
+    setItems, setSwipeDecisions, setDeletedItems,
   } = useAppStore()
 
   const pollRef             = useRef(null)
@@ -74,6 +71,13 @@ export function useMediaItems() {
           for (const r of newOnes) seenReadyIdsRef.current.add(r.uploadId)
           const mapped = newOnes.map(mapReadyItem)
           appendItems(mapped)
+          // Show corner toast if any of the new batch are duplicates
+          const dupeCount = newOnes.filter(r => r.isDuplicate).length
+          if (dupeCount > 0) {
+            const { showDupeToast, hideDupeToast } = useAppStore.getState()
+            showDupeToast(dupeCount)
+            setTimeout(() => hideDupeToast(), 5000)
+          }
           // Seed swipeDecisions for any already-decided items
           const { swipeDecisions, setSwipeDecisions } = useAppStore.getState()
           const updates = { ...swipeDecisions }
@@ -159,24 +163,30 @@ export function useMediaItems() {
     }
   }, [startPolling, setPickerState, setPickerError])
 
-  // v2.2: on mount, restore ALL uploads from backend DB — cross-session persistence
+  // v2.3 (updated v2.5): on mount, restore all uploads + deleted items from backend
   useEffect(() => {
     if (authState !== 'authenticated') return
     ;(async () => {
       try {
-        const allItems = await getAllUploads()
+        const [allItems, deletedRaw] = await Promise.all([
+          getAllUploads(),
+          getDeletedUploads(),
+        ])
         if (allItems.length > 0) {
           const mapped = allItems.map(mapReadyItem)
           setItems(mapped)
-          // Restore swipeDecisions map
           const decisions = {}
           for (const item of mapped) if (item.swipeDecision) decisions[item.id] = item.swipeDecision
           setSwipeDecisions(decisions)
           setPickerState('done')
           console.log(`[mount] restored ${mapped.length} uploads from backend`)
         }
+        if (deletedRaw.length > 0) {
+          setDeletedItems(deletedRaw.map(mapReadyItem))
+          console.log(`[mount] restored ${deletedRaw.length} deleted items`)
+        }
       } catch (err) {
-        console.error('[mount] getAllUploads failed:', err.message)
+        console.error('[mount] restore failed:', err.message)
       }
       // Resume any in-flight picker session
       const pending = getStoredPickerSession()

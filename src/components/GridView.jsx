@@ -1,11 +1,7 @@
-// GridView.jsx — v2.3
+// GridView.jsx — v2.4
 // PURPOSE: Chronological grid of curated photos.
-// v2.3 changes:
-//   - Sort+Group selector in header (date/month/album/name), persisted
-//   - Album filter header shown when activeAlbum is set, with home button
-//   - Album drawer trigger icon in header
-//   - Groups computed via applyGrouping() from lib/grouping.js
-//   - AlbumDrawer wired up
+// v2.4: added "Deleted from Google Photos" section at bottom of grid.
+//   Items shown at 60% opacity with 🗑 badge; excluded from swipe stack.
 
 import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -29,7 +25,7 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
   const {
     items, setView, setCurrentIndex, pickerError, uploadStatus,
     sortGroup, setSortGroup, activeAlbum, setActiveAlbum,
-    swipeDecisions,
+    swipeDecisions, deletedItems,
   } = useAppStore()
 
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -166,6 +162,20 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
           </section>
         ))}
 
+        {/* Deleted from Google Photos — shown below all normal groups, not swipeable */}
+        {!activeAlbum && deletedItems.length > 0 && (
+          <section className={styles.group}>
+            <h2 className={styles.dateLabel} style={{ color: 'var(--text-3)', fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+              Deleted from Google Photos
+            </h2>
+            <div className={styles.grid}>
+              {deletedItems.map(item => (
+                <DeletedThumb key={item.id} item={item} />
+              ))}
+            </div>
+          </section>
+        )}
+
         {hasItems && !activeAlbum && (
           <div className={styles.bottomActions}>
             <button className={styles.secondaryBtn} onClick={onAddMorePhotos} disabled={isWorking}>+ Add More Photos</button>
@@ -206,5 +216,21 @@ function GridThumb({ item, index, onOpen }) {
       {item.mediaMetadata?.video && <div className={styles.videoIcon}>▶</div>}
       <AlbumDot decision={decision} />
     </motion.button>
+  )
+}
+
+function DeletedThumb({ item }) {
+  const src = useAuthedMediaItemUrl(item.id, IMG_SIZES.thumb)
+  return (
+    <div className={styles.thumb} style={{ cursor: 'default', opacity: 0.6, position: 'relative' }}>
+      {src
+        ? <img src={src} alt={item.filename || ''} className={styles.thumbImg} loading="lazy" onError={(e) => { e.target.style.opacity='0.3' }}/>
+        : <div className={styles.thumbImg} style={{ background:'var(--bg-3)' }}/>}
+      <div style={{
+        position: 'absolute', bottom: 4, right: 4,
+        fontSize: 12, lineHeight: 1,
+        background: 'rgba(0,0,0,0.55)', borderRadius: 4, padding: '2px 3px',
+      }}>🗑</div>
+    </div>
   )
 }

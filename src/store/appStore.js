@@ -1,8 +1,7 @@
-// appStore.js — v2.3
+// appStore.js — v2.5
 // PURPOSE: Zustand global state for Photo Curator.
-// v2.3: added sortGroup (persisted preference) and activeAlbum (current
-// album filter — null means all photos). activeAlbum is set when the user
-// taps an album in the drawer and cleared when they return home.
+// v2.5: added deletedItems state for the "Deleted from Google Photos" grid section.
+// v2.4: added dupeToast state.
 
 import { create } from 'zustand'
 import { saveLastItem, saveView, saveItemsCache, getItemsCache, getLastItem, saveSortGroup, getSortGroup } from '../lib/storage.js'
@@ -25,6 +24,16 @@ export const useAppStore = create((set, get) => ({
   // null = all photos; 'good'|'bad'|'duplicate' = filtered view
   activeAlbum: null,
   setActiveAlbum: (album) => set({ activeAlbum: album }),
+
+  // ── Deleted items (detected as removed from Google Photos) ───────────────
+  deletedItems: [],
+  setDeletedItems: (deletedItems) => set({ deletedItems }),
+
+  // ── Duplicate toast ───────────────────────────────────────────────────────
+  // dupeToast: { count, visible } — shown when duplicates are skipped during upload
+  dupeToast: { count: 0, visible: false },
+  showDupeToast: (count) => set({ dupeToast: { count, visible: true } }),
+  hideDupeToast: () => set(s => ({ dupeToast: { ...s.dupeToast, visible: false } })),
 
   // ── Media items ───────────────────────────────────────────────────────────
   items:        [],
@@ -88,6 +97,7 @@ export const useAppStore = create((set, get) => ({
   resetItems: () => set({
     items: [], currentIndex: 0, swipeHistory: [],
     swipeDecisions: {}, activeAlbum: null,
+    deletedItems: [],
     pickerState: 'idle', pickerError: null, errorItems: null,
     uploadStatus: { pending: 0, downloading: 0, uploading: 0, done: 0, failed: 0 },
   }),
@@ -95,6 +105,7 @@ export const useAppStore = create((set, get) => ({
   reset: () => set({
     view: 'grid', items: [], currentIndex: 0, swipeHistory: [],
     swipeDecisions: {}, albums: {}, activeAlbum: null,
+    deletedItems: [],
     pickerState: 'idle', pickerError: null, errorItems: null,
     uploadStatus: { pending: 0, downloading: 0, uploading: 0, done: 0, failed: 0 },
   }),

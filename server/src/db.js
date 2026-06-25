@@ -1,8 +1,9 @@
-// db.js — v2.3
+// db.js — v2.4
 // PURPOSE: SQLite storage for Photo Curator backend.
+// v2.4: added deleted_at + last_verified_at columns and helpers for the
+//   deleted-photo detection feature (verifier.js).
 // v2.3: added getAlbumSummaries() — returns Good/Bad/Duplicates album
-// metadata (count + cover uploadId) for the album drawer.
-// All migration guards from v2.2 retained.
+//   metadata (count + cover uploadId) for the album drawer.
 
 import Database from 'better-sqlite3'
 import path from 'node:path'
@@ -78,6 +79,8 @@ const migrations = [
   ['error_message',     'ALTER TABLE uploads ADD COLUMN error_message TEXT'],
   ['retry_count',       'ALTER TABLE uploads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0'],
   ['google_email', 'ALTER TABLE uploads ADD COLUMN google_email TEXT'],
+  ['deleted_at',        'ALTER TABLE uploads ADD COLUMN deleted_at INTEGER'],
+  ['last_verified_at',  'ALTER TABLE uploads ADD COLUMN last_verified_at INTEGER'],
 ]
 for (const [col, sql] of migrations) {
   if (!existingCols.includes(col)) {
@@ -93,6 +96,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_uploads_dhash ON uploads(dhash);
   CREATE INDEX IF NOT EXISTS idx_uploads_date_taken ON uploads(exif_date_taken);
   CREATE INDEX IF NOT EXISTS idx_uploads_decision ON uploads(swipe_decision);
+  CREATE INDEX IF NOT EXISTS idx_uploads_deleted ON uploads(deleted_at);
+  CREATE INDEX IF NOT EXISTS idx_uploads_verified ON uploads(last_verified_at);
 `)
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -243,4 +248,69 @@ export function createUploadRow(sessionId, email, pickerSessionId, pickerItemId,
     VALUES (?, ?, ?, ?, ?)
   `)
   return stmt.run(sessionId, email, pickerSessionId, pickerItemId, mimeType).lastInsertRowid
+}
+
+// ── Verifier helpers (v2.4) ───────────────────────────────────────────────────
+
+// Returns up to `limit` items due for verification for a given email.
+// Eligible: done, not duplicate, not deleted, not verified in last 2 hours.
+export function getItemsForVerification(email, limit = 10) {
+  const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200
+  return db.prepare(`
+    SELECT id, our_media_item_id FROM uploads
+    WHERE google_email = ?
+      AND status = 'done'
+      AND our_media_item_id IS NOT NULL
+      AND is_duplicate = 0
+      AND deleted_at IS NULL
+      AND (last_verified_at IS NULL OR last_verified_at < ?)
+    ORDER BY last_verified_at ASC NULLS FIRST
+    LIMIT ?
+  `).all(email, twoHoursAgo, limit)
+}
+
+// Mark a single upload row as deleted.
+export function markDeleted(id) {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(`
+    UPDATE uploads SET deleted_at = ?, last_verified_at = ?,
+    updated_at = strftime('%s','now') WHERE id = ?
+  `).run(now, now, id)
+}
+
+// Mark a single upload row as verified (still exists in Google Photos).
+export function markVerified(id) {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(`
+    UPDATE uploads SET last_verified_at = ?,
+    updated_at = strftime('%s','now') WHERE id = ?
+  `).run(now, id)
+}
+
+// Purge rows deleted more than 15 days ago.
+export function purgeOldDeleted(email) {
+  const fifteenDaysAgo = Math.floor(Date.now() / 1000) - 15 * 24 * 3600
+  const result = db.prepare(`
+    DELETE FROM uploads
+    WHERE google_email = ? AND deleted_at IS NOT NULL AND deleted_at < ?
+  `).run(email, fifteenDaysAgo)
+  if (result.changes > 0) console.log(`[db] purged ${result.changes} rows deleted >15 days ago for ${email}`)
+}
+
+// Returns all deleted (but not yet purged) items for a user, for the frontend.
+export function getDeletedUploads(email) {
+  return db.prepare(`
+    SELECT * FROM uploads
+    WHERE google_email = ? AND deleted_at IS NOT NULL
+    ORDER BY deleted_at DESC
+  `).all(email)
+}
+
+// Returns all unique google_email values that have active sessions —
+// used by the cron job to know which accounts to verify.
+export function getActiveUserEmails() {
+  return db.prepare(`
+    SELECT DISTINCT google_email FROM sessions
+    WHERE google_email IS NOT NULL
+  `).all().map(r => r.google_email)
 }
