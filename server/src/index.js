@@ -19,6 +19,7 @@ import { createPickerSession, getPickerSession, deletePickerSession, fetchPicker
 import { kickWorkerPool, registerBaseUrl, registerRowContext } from './worker.js'
 import { createAlbum, batchAddMediaItems } from './library-upload.js'
 import { ensureThumbDirs, deleteThumbsBulk } from './thumbs.js'
+import { getCachedAlbumId, setCachedAlbumId } from './db.js' 
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -140,6 +141,8 @@ async function getOrCreateWorkingAlbum(sessionId) {
 }
 
 app.post('/api/picker-session/:id/start-upload', requireSession, async (req, res) => {
+  const session = getSession(req.sessionId);
+  const email = session?.google_email || 'sumeet@yours.com';
   const pickerSessionId = req.params.id
   const items = req.body?.items
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'MISSING_ITEMS' })
@@ -148,13 +151,14 @@ app.post('/api/picker-session/:id/start-upload', requireSession, async (req, res
     let enqueued = 0
     for (const item of items) {
       if (!item.id || !item.baseUrl) continue
-      const rowId = createUploadRow({
-        sessionId: req.sessionId, pickerSessionId,
-        pickerItemId: item.id, filename: item.filename || null,
-        fileSize: item.fileSize || null,
-        creationTime: item.mediaMetadata?.creationTime || null,
-        mimeType: item.mimeType || null,
-      })
+      const rowId = createUploadRow(req.sessionId, email, pickerSessionId, item.id, item.mimeType);
+      // const rowId = createUploadRow({
+      //   sessionId: req.sessionId, pickerSessionId,
+      //   pickerItemId: item.id, filename: item.filename || null,
+      //   fileSize: item.fileSize || null,
+      //   creationTime: item.mediaMetadata?.creationTime || null,
+      //   mimeType: item.mimeType || null,
+      // })
       registerBaseUrl(rowId, item.baseUrl)
       registerRowContext(rowId, { sessionId: req.sessionId, albumIdForUploads: albumId })
       enqueued++
@@ -232,11 +236,25 @@ app.post('/api/cleanup', requireSession, async (req, res) => {
 
 // ── Swipe routing ─────────────────────────────────────────────────────────────
 const albumIdCache = new Map()
-async function getOrCreateNamedAlbum(sessionId, title) {
-  if (albumIdCache.has(title)) return albumIdCache.get(title)
-  const album = await createAlbum(await getValidAccessToken(sessionId), title)
-  albumIdCache.set(title, album.id)
-  return album.id
+
+
+
+async function getOrCreateNamedAlbum(sessionId, albumTitle) {
+  const session = getSession(sessionId);
+  if (!session || !session.google_email) throw new Error('No user email for album caching');
+  const email = session.google_email;
+
+  // 1. Check permanent database cache first
+  let albumId = getCachedAlbumId(email, albumTitle);
+  if (albumId) return albumId;
+
+  // 2. If missing, create it via Google API
+  const accessToken = await getValidAccessToken(sessionId);
+  const album = await createAlbum(accessToken, albumTitle);
+  
+  // 3. Save permanently
+  setCachedAlbumId(email, albumTitle, album.id);
+  return album.id;
 }
 
 app.post('/api/swipe', requireSession, async (req, res) => {

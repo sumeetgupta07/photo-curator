@@ -52,6 +52,13 @@ db.exec(`
     created_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     updated_at        INTEGER NOT NULL DEFAULT (strftime('%s','now'))
   );
+  
+  CREATE TABLE IF NOT EXISTS user_albums (
+    google_email TEXT,
+    album_title  TEXT,
+    album_id     TEXT,
+    PRIMARY KEY (google_email, album_title)
+  );
 `)
 
 // 2. Safe migrations for existing DBs (Ensures new columns exist)
@@ -70,6 +77,7 @@ const migrations = [
   ['exif_camera_model', 'ALTER TABLE uploads ADD COLUMN exif_camera_model TEXT'],
   ['error_message',     'ALTER TABLE uploads ADD COLUMN error_message TEXT'],
   ['retry_count',       'ALTER TABLE uploads ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0'],
+  ['google_email', 'ALTER TABLE uploads ADD COLUMN google_email TEXT'],
 ]
 for (const [col, sql] of migrations) {
   if (!existingCols.includes(col)) {
@@ -117,13 +125,7 @@ export function deleteSession(sessionId) {
 
 // ── Uploads ───────────────────────────────────────────────────────────────────
 
-export function createUploadRow({ sessionId, pickerSessionId, pickerItemId, filename, fileSize, creationTime, mimeType }) {
-  const result = db.prepare(`
-    INSERT INTO uploads (session_id, picker_session_id, picker_item_id, filename, file_size, creation_time, mime_type, status)
-    VALUES (@sessionId, @pickerSessionId, @pickerItemId, @filename, @fileSize, @creationTime, @mimeType, 'pending')
-  `).run({ sessionId, pickerSessionId, pickerItemId, filename, fileSize, creationTime, mimeType })
-  return result.lastInsertRowid
-}
+
 
 export function findDuplicateUpload({ sessionId, filename, fileSize, creationTime }) {
   return db.prepare(`
@@ -214,4 +216,31 @@ export function getAlbumSummaries(sessionId) {
     }
     return { key, label, count: row?.count || 0, coverId: row?.cover_id || null }
   })
+}
+// --- ALBUM CACHING ---
+export function getCachedAlbumId(email, title) {
+  if (!email) return null;
+  const row = db.prepare('SELECT album_id FROM user_albums WHERE google_email = ? AND album_title = ?').get(email, title)
+  return row ? row.album_id : null
+}
+
+export function setCachedAlbumId(email, title, id) {
+  if (!email) return;
+  db.prepare('INSERT OR REPLACE INTO user_albums (google_email, album_title, album_id) VALUES (?, ?, ?)').run(email, title, id)
+}
+
+// --- SESSION PERSISTENCE FIX ---
+// Update this function to look up by email so uploads survive logouts
+export function getUploadsByUserEmail(email) {
+  if (!email) return [];
+  return db.prepare(`SELECT * FROM uploads WHERE google_email = ? ORDER BY creation_time ASC`).all(email)
+}
+
+// Modify createUploadRow to accept and save google_email
+export function createUploadRow(sessionId, email, pickerSessionId, pickerItemId, mimeType) {
+  const stmt = db.prepare(`
+    INSERT INTO uploads (session_id, google_email, picker_session_id, picker_item_id, mime_type)
+    VALUES (?, ?, ?, ?, ?)
+  `)
+  return stmt.run(sessionId, email, pickerSessionId, pickerItemId, mimeType).lastInsertRowid
 }

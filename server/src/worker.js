@@ -13,10 +13,11 @@ import { getValidAccessToken } from './google-auth.js'
 import { extractExif } from './exif.js'
 import { uploadBytes, createMediaItem, batchAddMediaItems, createAlbum } from './library-upload.js'
 import { generateThumbs, computeDHash } from './thumbs.js'
-import {
+import { db,
   updateUploadStatus, incrementRetryCount, getUploadRow,
   findDuplicateByHash, getPendingUploads,
 } from './db.js'
+import { getCachedAlbumId, setCachedAlbumId } from './db.js';
 
 const MAX_CONCURRENT     = 4
 const MAX_RETRIES        = 3
@@ -29,12 +30,22 @@ let queueRunning   = false
 
 // In-memory album ID cache for Duplicates album (same pattern as Good/Bad in index.js)
 let duplicatesAlbumId = null
+
 async function getOrCreateDuplicatesAlbum(sessionId) {
-  if (duplicatesAlbumId) return duplicatesAlbumId
-  const accessToken = await getValidAccessToken(sessionId)
-  const album = await createAlbum(accessToken, DUPLICATES_ALBUM_TITLE)
-  duplicatesAlbumId = album.id
-  return duplicatesAlbumId
+  // Grab the email from the session context
+  const session = getSession(sessionId); 
+  const email = session ? session.google_email : null;
+  
+  if (email) {
+    const cachedId = getCachedAlbumId(email, DUPLICATES_ALBUM_TITLE);
+    if (cachedId) return cachedId;
+  }
+
+  const accessToken = await getValidAccessToken(sessionId);
+  const album = await createAlbum(accessToken, DUPLICATES_ALBUM_TITLE);
+  
+  if (email) setCachedAlbumId(email, DUPLICATES_ALBUM_TITLE, album.id);
+  return album.id;
 }
 
 // Serialized batchCreate chain — Google requires no concurrent batchCreate per user
@@ -61,31 +72,37 @@ async function processOne(row, { sessionId, albumIdForUploads }) {
     const accessToken = await getValidAccessToken(sessionId)
     const buffer = await downloadOriginalBytes(accessToken, row._baseUrl, row.mime_type)
 
-    // ── dHash dedup (v2.2) ────────────────────────────────────────────────
+    // ── dHash dedup (FIXED) ───────────────────────────────────────────────
     const dhash = await computeDHash(buffer, row.mime_type)
-    const dup   = dhash ? findDuplicateByHash(sessionId, dhash) : null
+    
+    // Explicit string cast and stricter SQLite lookup to prevent duplicates leaking
+    // Note: requires importing `db` from db.js at the top of worker.js if not already there
+    const dup = dhash ? db.prepare(`SELECT id, our_media_item_id FROM uploads WHERE dhash = ? AND id != ? AND is_duplicate = 0 LIMIT 1`).get(String(dhash), row.id) : null;
 
     if (dup) {
       // Generate thumbs for this row so it's visible in the duplicate album view
       try { await generateThumbs(row.id, buffer, row.mime_type) } catch {}
 
-      // Upload fresh copy to Google Photos and add to Duplicates album.
-      // We do NOT reuse dup.our_media_item_id — Google rejects foreign IDs
-      // in batchAddMediaItems (issue 4 fix).
-      updateUploadStatus(row.id, 'uploading')
+      // Get persistent Album ID so we don't create multiple "Duplicates" albums
+      const dupAlbumId = await getOrCreateDuplicatesAlbum(sessionId);
+      
+      // Mark duplicate in DB immediately so the frontend drops it from the swipe stack
+      db.prepare(`UPDATE uploads SET is_duplicate = 1, duplicate_of_id = ?, dhash = ?, status = 'uploading', swipe_decision = 'duplicate' WHERE id = ?`)
+        .run(dup.id, String(dhash), row.id);
+
+      // Upload fresh copy to Google Photos and add to Duplicates album silently.
       const uploadToken  = await uploadBytes(accessToken, buffer, row.filename, row.mime_type)
-      const dupAlbumId   = await getOrCreateDuplicatesAlbum(sessionId)
       const mediaItem    = await serializedCreateMediaItem(accessToken, uploadToken, row.filename, dupAlbumId)
 
       updateUploadStatus(row.id, 'done', {
         our_media_item_id: mediaItem.id,
         is_duplicate:      1,
         duplicate_of_id:   dup.id,
-        dhash,
-        swipe_decision:    'duplicate',   // sentinel — excluded from swipe stack in getReadyUploads
+        dhash:             String(dhash),
+        swipe_decision:    'duplicate',   // sentinel — excluded from swipe stack
       })
       console.log(`[worker] #${row.id} "${row.filename}" — duplicate of #${dup.id}, routed to Duplicates album`)
-      return
+      return // Halt processing here!
     }
 
     // ── Thumbnails ────────────────────────────────────────────────────────
@@ -104,7 +121,7 @@ async function processOne(row, { sessionId, albumIdForUploads }) {
 
     updateUploadStatus(row.id, 'done', {
       our_media_item_id: mediaItem.id,
-      dhash,
+      dhash:             String(dhash), // Cast to string
       exif_raw:          exif.raw ? JSON.stringify(exif.raw) : null,
       exif_date_taken:   exif.dateTaken,
       exif_gps_lat:      exif.gpsLat,
