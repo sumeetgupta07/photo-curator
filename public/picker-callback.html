@@ -1,28 +1,4 @@
-<!doctype html>
-<html>
-<head>
-    <meta charset="UTF-8"/>
-    <title>Picker complete</title>
-    <style>body {
-        background: #0a0a0a;
-        color: #f0ede8;
-        font-family: sans-serif;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 100vh;
-        margin: 0
-    }
-
-    p {
-        font-size: 16px;
-        opacity: 0.6
-    }</style>
-</head>
-<body><p>Selection complete — closing…</p>
-<script>
-    if (window.opener) window.opener.postMessage({type: 'PICKER_DONE'}, window.location.origin)
-    setTimeout(() => window.close(), 800)
-</script>
-</body>
-</html>
+<!doctype html><html><head><meta charset="UTF-8"/><title>Picker complete</title><style>body{background:#0a0a0a;color:#f0ede8;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{font-size:16px;opacity:0.6}</style></head><body><p>Selection complete — closing…</p><script>
+if (window.opener) window.opener.postMessage({ type:'PICKER_DONE' }, window.location.origin)
+setTimeout(() => window.close(), 800)
+</script></body></html>

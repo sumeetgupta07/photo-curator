@@ -1,12 +1,20 @@
+/* GridView.module.css — v2.3: added sortRow, sortBtn styles */
 .root { height:100%; display:flex; flex-direction:column; overflow:hidden; padding-top:var(--safe-top); }
 .header { flex-shrink:0; border-bottom:1px solid var(--border); background:var(--bg); }
-.headerInner { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; }
+.headerInner { display:flex; align-items:center; justify-content:space-between; padding:16px 20px 10px; }
 .logo { font-family:'DM Serif Display',serif; font-size:22px; font-weight:400; color:var(--text); }
 .logo em { font-style:italic; color:var(--accent); }
-.headerActions { display:flex; align-items:center; gap:12px; }
+.headerActions { display:flex; align-items:center; gap:8px; }
 .count { font-size:12px; color:var(--text-3); }
 .iconBtn { width:36px; height:36px; display:flex; align-items:center; justify-content:center; border-radius:50%; color:var(--text-2); transition:background 0.2s, color 0.2s; }
 .iconBtn:active { background:var(--surface); color:var(--text); }
+
+/* Sort+Group selector */
+.sortRow { display:flex; gap:4px; padding:0 16px 10px; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+.sortRow::-webkit-scrollbar { display:none; }
+.sortBtn { flex-shrink:0; padding:5px 14px; border-radius:100px; font-size:12px; font-weight:500; color:var(--text-2); background:var(--bg-3); border:1px solid var(--border); transition:all 0.15s; white-space:nowrap; }
+.sortBtnActive { color:var(--bg); background:var(--accent); border-color:var(--accent); }
+
 .scroll { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding-bottom:calc(24px + var(--safe-bottom)); }
 .group { padding:0; }
 .dateLabel { font-size:13px; font-weight:500; color:var(--text-2); letter-spacing:0.02em; padding:20px 16px 10px; position:sticky; top:0; background:var(--bg); z-index:1; border-bottom:1px solid var(--border); margin-bottom:2px; }
@@ -14,14 +22,17 @@
 .thumb { position:relative; aspect-ratio:1; overflow:hidden; background:var(--bg-3); cursor:pointer; display:block; width:100%; padding:0; border:none; }
 .thumbImg { width:100%; height:100%; object-fit:cover; transition:transform 0.2s ease; }
 .videoIcon { position:absolute; bottom:6px; right:6px; font-size:10px; background:rgba(0,0,0,0.6); border-radius:4px; padding:2px 5px; color:white; }
+
 .statusBar { overflow:hidden; background:rgba(232,213,176,0.08); border-bottom:1px solid rgba(232,213,176,0.15); padding:10px 16px; font-size:13px; color:var(--accent); display:flex; align-items:center; gap:8px; }
 .statusSpinner { display:inline-block; width:12px; height:12px; border:1.5px solid rgba(232,213,176,0.3); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0; }
 .statusLink { color:var(--accent); text-decoration:underline; }
 @keyframes spin { to { transform:rotate(360deg); } }
-.emptyState { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:64px 32px; gap:16px; min-height:70vh; }
+
+.emptyState { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:64px 32px; gap:16px; min-height:60vh; }
 .emptyIcon { margin-bottom:8px; }
 .emptyTitle { font-family:'DM Serif Display',serif; font-size:26px; color:var(--text); }
 .emptySub { font-size:15px; color:var(--text-2); line-height:1.6; max-width:280px; font-weight:300; }
+
 .primaryBtn { margin-top:8px; padding:16px 28px; background:var(--accent); color:#1a1a1a; border-radius:100px; font-size:16px; font-weight:600; width:100%; max-width:300px; transition:opacity 0.2s; }
 .primaryBtn:active { opacity:0.85; }
 .secondaryBtn { padding:12px 20px; border:1px solid var(--border); border-radius:100px; color:var(--text-2); font-size:14px; background:var(--bg-2); }
