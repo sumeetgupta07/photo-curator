@@ -1,24 +1,8 @@
-// db.js — v2.0 Stage 3
-//
-// Stage 3: added swipe_decision column to uploads — persists each item's
-// Good/Bad/Skip decision so it survives page reloads and is available
-// for the /api/swipe route to act on. Also added getUploadByOurMediaItemId
-// and setSwipeDecision helpers used by the new /api/swipe backend route.
-//
-// PURPOSE: SQLite storage for the backend.
-//   - sessions: maps a session cookie ID to a Google refresh token (Stage 1)
-//   - uploads: tracks the download/re-upload pipeline per Picker item
-//     (Stage 2, new this version) — status, dedup key, our re-uploaded
-//     item's ID (used by Stage 3 for album writes), and full EXIF data.
-//
-// EXIF storage design (per user request): exif_raw stores the COMPLETE
-// parsed EXIF object as JSON — future-proof, queryable later via SQLite's
-// json_extract() if needed. A handful of commonly-needed fields are ALSO
-// promoted into their own indexed columns (exif_date_taken, exif_gps_lat/
-// lon, exif_camera_make/model) so the app can sort/filter on them directly
-// without parsing JSON on every query. Videos don't have traditional EXIF;
-// those columns stay NULL for video rows (see worker.js's exif extraction
-// step for how video metadata is handled differently).
+// db.js — v2.1
+// PURPOSE: SQLite storage for Photo Curator backend.
+// v2.1: added getUploadIdsByPickerSession for bulk thumbnail cleanup on
+// session clear. All other schema and helpers unchanged from v2.0 Stage 3.
+
 import Database from 'better-sqlite3'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -126,9 +110,7 @@ export function findDuplicateUpload({ sessionId, filename, fileSize, creationTim
 export function updateUploadStatus(id, status, extra = {}) {
   const fields = ['status = @status', "updated_at = strftime('%s','now')"]
   const params = { id, status, ...extra }
-  for (const key of Object.keys(extra)) {
-    fields.push(`${key} = @${key}`)
-  }
+  for (const key of Object.keys(extra)) fields.push(`${key} = @${key}`)
   db.prepare(`UPDATE uploads SET ${fields.join(', ')} WHERE id = @id`).run(params)
 }
 
@@ -164,8 +146,6 @@ export function getUploadStatusCounts(pickerSessionId) {
   return counts
 }
 
-// ── Stage 3 helpers ───────────────────────────────────────────────────────────
-
 export function getUploadByOurMediaItemId(sessionId, ourMediaItemId) {
   return db.prepare(`
     SELECT * FROM uploads WHERE session_id = ? AND our_media_item_id = ? LIMIT 1
@@ -176,4 +156,9 @@ export function setSwipeDecision(id, decision) {
   db.prepare(`
     UPDATE uploads SET swipe_decision = ?, updated_at = strftime('%s','now') WHERE id = ?
   `).run(decision, id)
+}
+
+// v2.1: returns all upload IDs for a session — used for bulk thumbnail cleanup
+export function getUploadIdsBySession(sessionId) {
+  return db.prepare(`SELECT id FROM uploads WHERE session_id = ?`).all(sessionId).map(r => r.id)
 }

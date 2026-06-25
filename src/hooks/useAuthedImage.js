@@ -1,16 +1,14 @@
-// useAuthedImage.js — v2.0 Stage 2
-//
-// PURPOSE: Build URLs for the backend's image proxies. Plain URL strings
-// work directly in <img src>/backgroundImage since auth is a same-origin
-// HTTP-only cookie (Stage 1) — no fetch()/blob/object-URL machinery needed.
-//
-// v2.0 Stage 2: added useAuthedMediaItemUrl()/preloadAuthedMediaItem(),
-// pointing at /api/image-proxy/by-id instead of /api/image-proxy. Once an
-// item has been re-uploaded (status=done, has our_media_item_id), the app
-// displays OUR copy rather than the original Picker baseUrl — see
-// GridView.jsx/SwipeCard.jsx/SwipeView.jsx v2.0 Stage 2 for where this
-// switch happens. The original baseUrl-based functions are kept for the
-// pre-upload "still uploading" preview state, if used.
+// useAuthedImage.js — v2.1
+// PURPOSE: Build URLs for backend image serving.
+// v2.1: switched by-id image URLs from /api/image-proxy/by-id (called
+// getMediaItem → 403 scope error for post-March-2025 projects) to
+// /api/thumbs/{size}/{uploadId}.jpg — locally generated thumbnails served
+// as static files by the backend. Size mapping:
+//   IMG_SIZES.thumb ('=w400-h400-c') → /api/thumbs/400/{uploadId}.jpg
+//   IMG_SIZES.full  ('=w1200')       → /api/thumbs/1600/{uploadId}.jpg
+//   IMG_SIZES.preload ('=w800')      → /api/thumbs/1600/{uploadId}.jpg
+// The uploadId here is the numeric uploads.id (item.id in the store),
+// NOT ourMediaItemId — see useMediaItems.js mapReadyItem for the mapping.
 import { useMemo } from 'react'
 
 export function authedImageUrl(baseUrl, sizeParam) {
@@ -19,52 +17,38 @@ export function authedImageUrl(baseUrl, sizeParam) {
   return `/api/image-proxy?${params.toString()}`
 }
 
-export function authedMediaItemUrl(mediaItemId, sizeParam) {
-  if (!mediaItemId) return null
-  const params = new URLSearchParams({ mediaItemId, size: sizeParam || '' })
-  return `/api/image-proxy/by-id?${params.toString()}`
+function sizeFolder(sizeParam) {
+  // '=w1200' and '=w800' both map to the 1600px copy (best quality available)
+  // '=w400-h400-c' maps to the 400px copy
+  if (!sizeParam) return 400
+  return sizeParam.startsWith('=w4') ? 400 : 1600
 }
 
-/**
- * Hook for rendering a single authenticated Picker API image (pre-upload
- * preview, by raw baseUrl). No async state needed — pure, synchronous URL
- * builder memoized on its inputs.
- */
+export function authedMediaItemUrl(uploadId, sizeParam) {
+  if (!uploadId) return null
+  return `/api/thumbs/${sizeFolder(sizeParam)}/${uploadId}.jpg`
+}
+
 export function useAuthedImageUrl(baseUrl, sizeParam) {
   return useMemo(() => authedImageUrl(baseUrl, sizeParam), [baseUrl, sizeParam])
 }
 
-/**
- * Hook for rendering OUR re-uploaded copy of an item, by our_media_item_id.
- * This is the primary image-display path once an item's upload completes.
- */
-export function useAuthedMediaItemUrl(mediaItemId, sizeParam) {
-  return useMemo(() => authedMediaItemUrl(mediaItemId, sizeParam), [mediaItemId, sizeParam])
+export function useAuthedMediaItemUrl(uploadId, sizeParam) {
+  return useMemo(() => authedMediaItemUrl(uploadId, sizeParam), [uploadId, sizeParam])
 }
 
-/**
- * Preload an image into the browser's HTTP cache ahead of time (e.g. for
- * upcoming swipe cards).
- */
 export function preloadAuthedImage(baseUrl, sizeParam) {
   const url = authedImageUrl(baseUrl, sizeParam)
   if (!url) return
-  const img = new Image()
-  img.src = url
+  const img = new Image(); img.src = url
 }
 
-export function preloadAuthedMediaItem(mediaItemId, sizeParam) {
-  const url = authedMediaItemUrl(mediaItemId, sizeParam)
+export function preloadAuthedMediaItem(uploadId, sizeParam) {
+  const url = authedMediaItemUrl(uploadId, sizeParam)
   if (!url) return
-  const img = new Image()
-  img.src = url
+  const img = new Image(); img.src = url
 }
 
-/**
- * No-op — kept as a named export so existing callers (signOut,
- * clearAndReset) don't need conditional imports. There's no client-side
- * object-URL cache anymore; the browser's native HTTP cache handles this.
- */
 export function clearAuthedImageCache() {
-  // Intentionally empty — see comment above.
+  // Intentionally empty — browser HTTP cache handles this.
 }

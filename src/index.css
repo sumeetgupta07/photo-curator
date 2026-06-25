@@ -1,71 +1,19 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Serif+Display:ital@0;1&display=swap');
-
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  -webkit-tap-highlight-color: transparent;
-}
-
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 :root {
-  --bg: #0a0a0a;
-  --bg-2: #141414;
-  --bg-3: #1e1e1e;
-  --surface: #242424;
-  --border: rgba(255,255,255,0.08);
-  --text: #f0ede8;
-  --text-2: rgba(240,237,232,0.55);
-  --text-3: rgba(240,237,232,0.3);
-  --good: #4ade80;
-  --good-glow: rgba(74,222,128,0.25);
-  --bad: #f87171;
-  --bad-glow: rgba(248,113,113,0.25);
-  --skip: rgba(255,255,255,0.15);
-  --accent: #e8d5b0;
-  --radius: 16px;
-  --safe-top: env(safe-area-inset-top, 0px);
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --bg: #0a0a0a; --bg-2: #141414; --bg-3: #1e1e1e; --surface: #242424;
+  --border: rgba(255,255,255,0.08); --text: #f0ede8;
+  --text-2: rgba(240,237,232,0.55); --text-3: rgba(240,237,232,0.3);
+  --good: #4ade80; --good-glow: rgba(74,222,128,0.25);
+  --bad: #f87171; --bad-glow: rgba(248,113,113,0.25);
+  --skip: rgba(255,255,255,0.15); --accent: #e8d5b0; --radius: 16px;
+  --safe-top: env(safe-area-inset-top, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
-
-html, body, #root {
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-}
-
-body {
-  font-family: 'DM Sans', sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  overscroll-behavior: none;
-  -webkit-font-smoothing: antialiased;
-}
-
-button {
-  font-family: inherit;
-  cursor: pointer;
-  border: none;
-  background: none;
-  color: inherit;
-}
-
-img {
-  display: block;
-  user-select: none;
-  -webkit-user-drag: none;
-}
-
-/* Scrollbar styling */
+html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); overscroll-behavior: none; -webkit-font-smoothing: antialiased; }
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+img { display: block; user-select: none; -webkit-user-drag: none; }
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
-
-/* Utility */
-.sr-only {
-  position: absolute;
-  width: 1px; height: 1px;
-  padding: 0; margin: -1px;
-  overflow: hidden;
-  clip: rect(0,0,0,0);
-  border: 0;
-}
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
