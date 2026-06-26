@@ -1,4 +1,8 @@
-// google-auth.js — v2.0 Stage 1
+// google-auth.js — v2.1
+// PURPOSE: Google OAuth helpers for Photo Curator backend.
+// v2.1: added photoslibrary.readonly.appcreateddata scope — required for
+//   GET /v1/mediaItems/{id} to verify deleted photos. Existing sessions
+//   will need to re-authenticate to get this scope consented.
 import { getSession, updateAccessToken } from './db.js'
 const TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const AUTH_URL  = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -8,7 +12,8 @@ const REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI
 const SCOPES = [
   'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
   'https://www.googleapis.com/auth/photoslibrary.appendonly',
-  'openid','email',
+  'https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata',
+  'openid', 'email',
 ].join(' ')
 if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI) {
   console.warn('[google-auth] WARNING: missing env vars in server/.env')

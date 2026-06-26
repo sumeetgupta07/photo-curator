@@ -1,14 +1,10 @@
-# docker-compose.yml — v2.0 Stage 1
-# Added the `backend` service (OAuth + image proxy). Not exposed to the
-# internet directly — only reachable from the host (for Caddy to proxy to)
-# and from the photo-curator container's network. See server/README.md.
+# docker-compose.yml — v2.1
 services:
   photo-curator:
     build: .
     ports:
       - "5173:5173"
     volumes:
-      # Hot-reload: mount source so edits reflect immediately
       - ./src:/app/src
       - ./public:/app/public
       - ./index.html:/app/index.html
@@ -35,6 +31,7 @@ services:
     restart: unless-stopped
     networks:
       - media_network
+
 volumes:
   backend-data:
 
