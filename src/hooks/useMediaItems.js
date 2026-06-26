@@ -9,7 +9,7 @@ import {
   createPickerSession, getPickerSession,
   fetchPickerItems, deletePickerSession,
   startUpload, getUploadStatus, getReadyUploads,
-  getAllUploads, getDeletedUploads, cleanupSession,
+  getUploadQueue, getAllUploads, getDeletedUploads, cleanupSession,
 } from '../lib/backendApi.js'
 import { savePickerSession, getPickerSession as getStoredPickerSession, clearItemsCache, saveLastItem } from '../lib/storage.js'
 import { PICKER_POLL_MS } from '../lib/config.js'
@@ -40,7 +40,7 @@ export function useMediaItems() {
   const {
     appendItems, setPickerState, setPickerError,
     setView, authState, setUploadStatus,
-    setItems, setSwipeDecisions, setDeletedItems,
+    setItems, setSwipeDecisions, setDeletedItems, setQueueItems,
   } = useAppStore()
 
   const pollRef             = useRef(null)
@@ -60,11 +60,31 @@ export function useMediaItems() {
 
     uploadPollRef.current = setInterval(async () => {
       try {
-        const [status, ready] = await Promise.all([
+        const [status, ready, queue] = await Promise.all([
           getUploadStatus(pickerSessionId),
           getReadyUploads(pickerSessionId),
+          getUploadQueue(pickerSessionId),
         ])
         setUploadStatus(status)
+
+        // Update queue drawer items; schedule removal of 'done' items after 2s
+        setQueueItems(prev => {
+          // Merge: keep failed items already in store even if they drop off the queue
+          const prevFailed = (prev || []).filter(i => i.status === 'failed')
+          const prevFailedIds = new Set(prevFailed.map(i => i.id))
+          const merged = [
+            ...queue.filter(i => !prevFailedIds.has(i.id)),
+            ...prevFailed.filter(i => !queue.find(q => q.id === i.id)),
+          ]
+          return merged
+        })
+        // Schedule removal of newly-done items after 2s
+        const doneIds = queue.filter(i => i.status === 'done').map(i => i.id)
+        if (doneIds.length > 0) {
+          setTimeout(() => {
+            setQueueItems(prev => (prev || []).filter(i => !doneIds.includes(i.id) || i.status !== 'done'))
+          }, 2000)
+        }
 
         const newOnes = ready.filter(r => !seenReadyIdsRef.current.has(r.uploadId))
         if (newOnes.length > 0) {

@@ -32,6 +32,10 @@ export async function getReadyUploads(pickerSessionId) {
   const d = await backendRequest(`/api/uploads/ready?pickerSessionId=${encodeURIComponent(pickerSessionId)}`)
   return d.items
 }
+export async function getUploadQueue(pickerSessionId) {
+  const d = await backendRequest(`/api/uploads/queue?pickerSessionId=${encodeURIComponent(pickerSessionId)}`)
+  return d.items
+}
 export async function getAllUploads() {
   const d = await backendRequest('/api/uploads/all')
   return d.items
@@ -39,6 +43,9 @@ export async function getAllUploads() {
 export async function getDeletedUploads() {
   const d = await backendRequest('/api/uploads/deleted')
   return d.items
+}
+export async function getScopeStatus() {
+  return backendRequest('/api/scope-status')
 }
 export async function retryUpload(uploadId)  { return backendRequest(`/api/uploads/${uploadId}/retry`, { method: 'POST' }) }
 export async function cleanupSession()       { return backendRequest('/api/cleanup', { method: 'POST' }) }

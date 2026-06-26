@@ -15,7 +15,7 @@ import { uploadBytes, createMediaItem, batchAddMediaItems, createAlbum } from '.
 import { generateThumbs, computeDHash } from './thumbs.js'
 import { db,
   updateUploadStatus, incrementRetryCount, getUploadRow,
-  findDuplicateByHash, getPendingUploads,
+  findDuplicateByHash, getPendingUploads, getSession,
 } from './db.js'
 import { getCachedAlbumId, setCachedAlbumId } from './db.js';
 

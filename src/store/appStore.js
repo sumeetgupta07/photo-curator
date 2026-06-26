@@ -1,6 +1,7 @@
-// appStore.js — v2.5
+// appStore.js — v2.6
 // PURPOSE: Zustand global state for Photo Curator.
-// v2.5: added deletedItems state for the "Deleted from Google Photos" grid section.
+// v2.6: added queueItems + queueOpen for the QueueDrawer panel.
+// v2.5: added deletedItems state.
 // v2.4: added dupeToast state.
 
 import { create } from 'zustand'
@@ -24,6 +25,16 @@ export const useAppStore = create((set, get) => ({
   // null = all photos; 'good'|'bad'|'duplicate' = filtered view
   activeAlbum: null,
   setActiveAlbum: (album) => set({ activeAlbum: album }),
+
+  // ── Upload queue drawer ───────────────────────────────────────────────────
+  // queueItems: [{ id, filename, status }] — per-item queue for QueueDrawer
+  // done items are removed after 2s by useMediaItems
+  queueItems: [],
+  queueOpen: false,
+  setQueueItems: (updater) => set(s => ({
+    queueItems: typeof updater === 'function' ? updater(s.queueItems) : updater
+  })),
+  setQueueOpen: (queueOpen) => set({ queueOpen }),
 
   // ── Deleted items (detected as removed from Google Photos) ───────────────
   deletedItems: [],
@@ -97,7 +108,7 @@ export const useAppStore = create((set, get) => ({
   resetItems: () => set({
     items: [], currentIndex: 0, swipeHistory: [],
     swipeDecisions: {}, activeAlbum: null,
-    deletedItems: [],
+    deletedItems: [], queueItems: [], queueOpen: false,
     pickerState: 'idle', pickerError: null, errorItems: null,
     uploadStatus: { pending: 0, downloading: 0, uploading: 0, done: 0, failed: 0 },
   }),
@@ -105,7 +116,7 @@ export const useAppStore = create((set, get) => ({
   reset: () => set({
     view: 'grid', items: [], currentIndex: 0, swipeHistory: [],
     swipeDecisions: {}, albums: {}, activeAlbum: null,
-    deletedItems: [],
+    deletedItems: [], queueItems: [], queueOpen: false,
     pickerState: 'idle', pickerError: null, errorItems: null,
     uploadStatus: { pending: 0, downloading: 0, uploading: 0, done: 0, failed: 0 },
   }),

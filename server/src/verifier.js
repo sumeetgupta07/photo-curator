@@ -1,15 +1,9 @@
-// verifier.js — v1.0
+// verifier.js — v1.1
 // PURPOSE: Deleted-photo detection for Photo Curator.
-// Checks app-uploaded photos against the Google Photos Library API.
-// A 404 / NOT_FOUND response means the photo was deleted or trashed
-// (both are treated identically — see REQUIREMENTS.md §9 Known Limitations).
-//
-// Called from two places:
-//   1. /api/oauth/callback (fresh login) — runs immediately in background
-//   2. node-cron job every 2 hours
-//
-// Strategy: batch loop of 10 items at a time, 500ms between batches,
-// until all items with last_verified_at older than 2 hours are processed.
+// v1.1: 403 responses now abort the entire run and log a clear re-login
+//   message. This happens when the session token is missing the
+//   photoslibrary.readonly.appcreateddata scope (added in google-auth v2.1).
+//   User must log out and back in once to re-consent with the new scope.
 
 import {
   getItemsForVerification,
@@ -17,6 +11,7 @@ import {
   markVerified,
   purgeOldDeleted,
   getActiveUserEmails,
+  setNeedsReauthScope,
 } from './db.js'
 import { db } from './db.js'
 
@@ -38,8 +33,10 @@ async function getTokenForEmail(email, getValidAccessToken) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
-// Verify one batch of items. Returns { checked, deleted } counts.
-async function verifyBatch(items, token) {
+// Verify one batch of items.
+// Returns { checked, deleted, needsReauth } counts.
+// needsReauth=true means the caller should abort the entire run.
+async function verifyBatch(items, token, email) {
   let deleted = 0
   for (const item of items) {
     try {
@@ -50,6 +47,18 @@ async function verifyBatch(items, token) {
         markDeleted(item.id)
         deleted++
         console.log(`[verifier] ✗ deleted: upload#${item.id} (${item.our_media_item_id})`)
+      } else if (res.status === 403) {
+        // Missing photoslibrary.readonly.appcreateddata scope —
+        // token was issued before v2.1 added this scope.
+        // Abort the entire run; user must re-login to re-consent.
+        setNeedsReauthScope(email, true)
+        console.warn(
+          '[verifier] ⚠ 403 PERMISSION_DENIED — token is missing the ' +
+          'photoslibrary.readonly.appcreateddata scope.\n' +
+          '[verifier] → Please log out and log back in to grant the new scope.\n' +
+          '[verifier] → Verification will resume automatically after re-login.'
+        )
+        return { checked: 0, deleted: 0, needsReauth: true }
       } else if (res.ok) {
         markVerified(item.id)
       } else {
@@ -61,7 +70,7 @@ async function verifyBatch(items, token) {
       console.warn(`[verifier] network error for upload#${item.id}: ${err.message}`)
     }
   }
-  return { checked: items.length, deleted }
+  return { checked: items.length, deleted, needsReauth: false }
 }
 
 // Main entry point. Pass in getValidAccessToken from google-auth.js
@@ -92,7 +101,13 @@ export async function runVerificationPass(email, getValidAccessToken) {
 
     round++
     console.log(`[verifier] batch ${round}: checking ${batch.length} items`)
-    const { checked, deleted } = await verifyBatch(batch, token)
+    const { checked, deleted, needsReauth } = await verifyBatch(batch, token, email)
+
+    if (needsReauth) {
+      console.warn(`[verifier] aborting pass for ${email} — re-login required`)
+      return { needsReauth: true }
+    }
+
     totalChecked += checked
     totalDeleted += deleted
 
@@ -101,6 +116,7 @@ export async function runVerificationPass(email, getValidAccessToken) {
   }
 
   console.log(`[verifier] pass complete for ${email}: ${totalChecked} checked, ${totalDeleted} newly deleted`)
+  return { needsReauth: false }
 }
 
 // Called by the cron job — runs for all users with active sessions.

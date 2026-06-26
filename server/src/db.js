@@ -82,6 +82,17 @@ const migrations = [
   ['deleted_at',        'ALTER TABLE uploads ADD COLUMN deleted_at INTEGER'],
   ['last_verified_at',  'ALTER TABLE uploads ADD COLUMN last_verified_at INTEGER'],
 ]
+
+// Session-level migrations
+const sessionCols = db.prepare('PRAGMA table_info(sessions)').all().map(r => r.name)
+const sessionMigrations = [
+  ['needs_reauth_scope', 'ALTER TABLE sessions ADD COLUMN needs_reauth_scope INTEGER NOT NULL DEFAULT 0'],
+]
+for (const [col, sql] of sessionMigrations) {
+  if (!sessionCols.includes(col)) {
+    try { db.exec(sql) } catch (e) { console.warn('[db] session migration skipped:', e.message) }
+  }
+}
 for (const [col, sql] of migrations) {
   if (!existingCols.includes(col)) {
     try { db.exec(sql) } catch (e) { console.warn('[db] migration skipped:', e.message) }
@@ -313,4 +324,16 @@ export function getActiveUserEmails() {
     SELECT DISTINCT google_email FROM sessions
     WHERE google_email IS NOT NULL
   `).all().map(r => r.google_email)
+}
+
+// Flag a session as needing re-auth (missing appcreateddata scope).
+export function setNeedsReauthScope(email, value) {
+  db.prepare(`UPDATE sessions SET needs_reauth_scope = ? WHERE google_email = ?`)
+    .run(value ? 1 : 0, email)
+}
+
+// Check if current session needs re-auth.
+export function getNeedsReauthScope(sessionId) {
+  const row = db.prepare('SELECT needs_reauth_scope FROM sessions WHERE session_id = ?').get(sessionId)
+  return row ? !!row.needs_reauth_scope : false
 }

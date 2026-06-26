@@ -1,12 +1,9 @@
-// index.js — v2.5
+// index.js — v2.7
 // PURPOSE: Photo Curator backend — all Express routes.
-// v2.5: deleted-photo detection feature —
-//   - imports verifier.js + node-cron
-//   - triggers runVerificationPass on fresh login (oauth/callback)
-//   - cron job runs runVerificationPassForAllUsers every 2 hours
-//   - new GET /api/uploads/deleted route
-// v2.4: /api/uploads/all queries by google_email for cross-login persistence.
-// v2.3: added GET /api/albums.
+// v2.7: added GET /api/uploads/queue — per-item filename+status for QueueDrawer.
+// v2.6: scope-status endpoint + reauth flag on 403.
+// v2.5: deleted-photo detection (verifier + cron).
+// v2.4: /api/uploads/all queries by google_email.
 import 'dotenv/config'
 import express from 'express'
 import cookieParser from 'cookie-parser'
@@ -16,7 +13,8 @@ import {
   createUploadRow, getReadyUploads,
   getUploadStatusCounts, getUploadRow, updateUploadStatus,
   getUploadByOurMediaItemId, setSwipeDecision,
-  getUploadIdsBySession, getAlbumSummaries, getDeletedUploads, db,
+  getUploadIdsBySession, getAlbumSummaries, getDeletedUploads,
+  setNeedsReauthScope, getNeedsReauthScope, db,
 } from './db.js'
 import { buildAuthUrl, exchangeCodeForTokens, getValidAccessToken } from './google-auth.js'
 import { createPickerSession, getPickerSession, deletePickerSession, fetchPickerItems } from './picker.js'
@@ -77,6 +75,8 @@ app.get('/api/oauth/callback', async (req, res) => {
     const now = Math.floor(Date.now() / 1000)
     saveSession(sessionId, { refreshToken: tokens.refresh_token, accessToken: tokens.access_token, accessTokenExp: now + tokens.expires_in, googleEmail: email })
     res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true, secure: IS_PROD, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 24 * 90 })
+    // v2.1: clear reauth flag — user just re-consented with updated scopes
+    if (email) setNeedsReauthScope(email, false)
     res.redirect('/')
     // v2.5: trigger verification pass in background after fresh login (don't await)
     if (email) {
@@ -95,6 +95,11 @@ app.get('/api/me', (req, res) => {
   const session = sessionId ? getSession(sessionId) : null
   if (!session) return res.json({ authenticated: false })
   res.json({ authenticated: true, email: session.google_email || null })
+})
+
+// v2.6: scope status — tells frontend if re-login is needed for new scopes
+app.get('/api/scope-status', requireSession, (req, res) => {
+  res.json({ needsReauth: getNeedsReauthScope(req.sessionId) })
 })
 
 app.post('/api/logout', (req, res) => {
@@ -217,7 +222,8 @@ app.get('/api/uploads/all', requireSession, (req, res) => {
   if (!email) return res.json({ items: [] })
   const rows = db.prepare(`
     SELECT * FROM uploads
-    WHERE google_email = ? AND status = 'done' AND our_media_item_id IS NOT NULL AND is_duplicate = 0
+    WHERE google_email = ? AND status = 'done' AND our_media_item_id IS NOT NULL
+      AND is_duplicate = 0 AND deleted_at IS NULL
     ORDER BY id ASC
   `).all(email)
   res.json({ items: rows.map(rowToItem) })
@@ -231,6 +237,18 @@ app.get('/api/uploads/deleted', requireSession, (req, res) => {
   if (!email) return res.json({ items: [] })
   const rows = getDeletedUploads(email)
   res.json({ items: rows.map(rowToItem) })
+})
+
+// v2.7: per-item queue for the QueueDrawer — returns id, filename, status for all rows in session
+app.get('/api/uploads/queue', requireSession, (req, res) => {
+  const { pickerSessionId } = req.query
+  if (!pickerSessionId) return res.status(400).json({ error: 'MISSING_PICKER_SESSION_ID' })
+  const rows = db.prepare(`
+    SELECT id, filename, status, mime_type FROM uploads
+    WHERE picker_session_id = ?
+    ORDER BY id ASC
+  `).all(String(pickerSessionId))
+  res.json({ items: rows })
 })
 
 app.post('/api/uploads/:id/retry', requireSession, (req, res) => {
