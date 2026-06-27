@@ -1,0 +1,22 @@
+{
+  // Photo Curator v3.0.1 — extension/tsconfig.json
+  // Purpose: TypeScript configuration for Plasmo Chrome extension build.
+  //          Extends Plasmo's base tsconfig. Required by Plasmo build pipeline.
+  //
+  // Changelog:
+  //   v3.0.1 — Added. Was missing, caused ENOENT build failure.
+  "extends": "plasmo/templates/tsconfig.base",
+  "compilerOptions": {
+    "paths": {
+      "~*": ["./*"]
+    }
+  },
+  "include": [
+    ".plasmo/index.d.ts",
+    "**/*.ts",
+    "**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

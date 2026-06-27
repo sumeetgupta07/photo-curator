@@ -1,40 +1,39 @@
-# docker-compose.yml — v2.1
-services:
-  photo-curator:
-    build: .
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./src:/app/src
-      - ./public:/app/public
-      - ./index.html:/app/index.html
-      - ./vite.config.js:/app/vite.config.js
-    environment:
-      - NODE_ENV=development
-    restart: unless-stopped
-    depends_on:
-      - backend
-    networks:
-      - media_network
+# Photo Curator v3.0.0 — docker-compose.yml
+# Purpose: Docker Compose for v3 backend.
+#          Frontend (PWA) to be added in Phase 3.
+#          No OAuth. No upload pipeline. Clean slate.
+#
+# Changelog:
+#   v3.0.0 — Initial v3 compose. Backend only for Phase 1.
 
+version: '3.8'
+
+services:
   backend:
-    build: ./server
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: photo-curator-backend
+    restart: unless-stopped
     ports:
       - "3001:3001"
     volumes:
-      - ./server/src:/app/src
-      - backend-data:/app/data
-    env_file:
-      - ./server/.env
+      - curator_data:/app/data
     environment:
-      - NODE_ENV=development
-    restart: unless-stopped
-    networks:
-      - media_network
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_PATH=/app/data/photo-curator.db
+      - THUMBS_DIR=/app/data/thumbs
+      # Set these in a .env file — do NOT commit real values
+      - EXT_SECRET=${EXT_SECRET}
+      - CURATOR_PASSWORD=${CURATOR_PASSWORD}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://photo.sumeetg.duckdns.org}
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
-  backend-data:
-
-networks:
-  media_network:
-    external: true
+  curator_data:
+    name: photo_curator_v3_data

@@ -1,0 +1,47 @@
+{
+  "name": "photo-curator-extension",
+  "displayName": "Photo Curator",
+  "version": "3.0.5",
+  "_comment": [
+    "Photo Curator v3.0.5 — extension/package.json",
+    "Purpose: Plasmo Chrome extension dependencies and manifest config.",
+    "Changelog:",
+    "  v3.0.5 — Added @parcel/watcher ^2.5.6 override. v2.2.0 (pulled by Plasmo)",
+    "           requires native gyp compilation on Node 20 LTS in Docker.",
+    "           v2.5.6 ships npm prebuilts (linux-x64-glibc) — no compilation needed.",
+    "  v3.0.4 — Added sharp ^0.33.0 override (npm prebuilts, no GitHub download).",
+    "           Added assets/icon.png. Added tsconfig.json.",
+    "  v3.0.0 — Initial version."
+  ],
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "package": "plasmo package"
+  },
+  "dependencies": {
+    "plasmo": "^0.89.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.260",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "typescript": "^5.3.3"
+  },
+  "overrides": {
+    "sharp": "^0.33.0",
+    "@parcel/watcher": "^2.5.6"
+  },
+  "manifest": {
+    "permissions": ["scripting","storage","tabs","activeTab"],
+    "host_permissions": [
+      "https://photos.google.com/*",
+      "https://*.googleapis.com/*",
+      "https://lh3.googleusercontent.com/*"
+    ],
+    "content_security_policy": {
+      "extension_pages": "script-src 'self'; object-src 'self'"
+    }
+  }
+}
