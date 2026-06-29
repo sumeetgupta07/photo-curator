@@ -1,6 +1,11 @@
-// picker.js — v2.0 Stage 1
+// picker.js — v2.1
+// PURPOSE: Google Photos Picker API proxy functions.
+// v2.1: normalizePickerItem now passes filename and fileSize through to the
+// caller so index.js can persist them in createUploadRow (fixes null filename).
+
 const PICKER_API = 'https://photospicker.googleapis.com/v1'
-const PAGE_SIZE = 100
+const PAGE_SIZE  = 100
+
 async function pickerReq(accessToken, path, options = {}) {
   const res = await fetch(`${PICKER_API}${path}`, {
     ...options,
@@ -14,15 +19,19 @@ async function pickerReq(accessToken, path, options = {}) {
   if (res.status === 204) return null
   return res.json()
 }
+
 export async function createPickerSession(accessToken) {
   return pickerReq(accessToken, '/sessions', { method: 'POST', body: '{}' })
 }
+
 export async function getPickerSession(accessToken, sessionId) {
   return pickerReq(accessToken, `/sessions/${sessionId}`)
 }
+
 export async function deletePickerSession(accessToken, sessionId) {
   return pickerReq(accessToken, `/sessions/${sessionId}`, { method: 'DELETE' })
 }
+
 export async function fetchPickerItems(accessToken, sessionId) {
   const items = []
   let pageToken = null
@@ -36,18 +45,21 @@ export async function fetchPickerItems(accessToken, sessionId) {
   } while (pageToken)
   return items
 }
+
 function normalizePickerItem(raw) {
-  const mf = raw.mediaFile || {}
+  const mf  = raw.mediaFile || {}
+  const mfm = mf.mediaFileMetadata || {}
   return {
-    id: raw.id,
-    baseUrl: mf.baseUrl || raw.baseUrl || '',
+    id:       raw.id,
+    baseUrl:  mf.baseUrl  || raw.baseUrl  || '',
     mimeType: mf.mimeType || raw.mimeType || '',
-    filename: mf.filename || raw.filename || '',
+    filename: mf.filename || raw.filename || null,   // v2.1: was missing in v2.0
+    fileSize: mfm.fileSize ? Number(mfm.fileSize) : null,  // v2.1: passed for dedup
     mediaMetadata: {
-      creationTime: mf.mediaFileMetadata?.creationTime || raw.createTime || null,
-      width: Number(mf.mediaFileMetadata?.width) || null,
-      height: Number(mf.mediaFileMetadata?.height) || null,
-      video: mf.mediaFileMetadata?.videoMetadata || null,
+      creationTime: mfm.creationTime || raw.createTime || null,
+      width:        Number(mfm.width)  || null,
+      height:       Number(mfm.height) || null,
+      video:        mfm.videoMetadata  || null,
     },
   }
 }

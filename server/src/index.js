@@ -1,9 +1,16 @@
-// index.js — v2.7
+// index.js — v2.8
 // PURPOSE: Photo Curator backend — all Express routes.
+// v2.8 changes:
+//   - start-upload: now passes filename, fileSize, creationTime, pickerBaseUrl
+//     to createUploadRow (fixes "null" filename bug throughout the app)
+//   - /api/swipe: getUploadByOurMediaItemId now called with email instead of
+//     sessionId (fixes 404 after session rotation)
+//   - GET /api/quota: returns today's API call count from quota_log table
+//   - Live Photo: no route changes needed — handled entirely in worker.js
 // v2.7: added GET /api/uploads/queue — per-item filename+status for QueueDrawer.
 // v2.6: scope-status endpoint + reauth flag on 403.
 // v2.5: deleted-photo detection (verifier + cron).
-// v2.4: /api/uploads/all queries by google_email.
+
 import 'dotenv/config'
 import express from 'express'
 import cookieParser from 'cookie-parser'
@@ -14,14 +21,15 @@ import {
   getUploadStatusCounts, getUploadRow, updateUploadStatus,
   getUploadByOurMediaItemId, setSwipeDecision,
   getUploadIdsBySession, getAlbumSummaries, getDeletedUploads,
-  setNeedsReauthScope, getNeedsReauthScope, db,
+  setNeedsReauthScope, getNeedsReauthScope, getQuotaToday,
+  incrementQuotaLog, db,
 } from './db.js'
 import { buildAuthUrl, exchangeCodeForTokens, getValidAccessToken } from './google-auth.js'
 import { createPickerSession, getPickerSession, deletePickerSession, fetchPickerItems } from './picker.js'
 import { kickWorkerPool, registerBaseUrl, registerRowContext } from './worker.js'
 import { createAlbum, batchAddMediaItems } from './library-upload.js'
 import { ensureThumbDirs, deleteThumbsBulk } from './thumbs.js'
-import { getCachedAlbumId, setCachedAlbumId } from './db.js' 
+import { getCachedAlbumId, setCachedAlbumId } from './db.js'
 import cron from 'node-cron'
 import { runVerificationPass, runVerificationPassForAllUsers } from './verifier.js'
 
@@ -55,6 +63,12 @@ function requireSession(req, res, next) {
   next()
 }
 
+// Helper: get email for current session
+function sessionEmail(req) {
+  const session = getSession(req.sessionId)
+  return session?.google_email || null
+}
+
 // ── OAuth ─────────────────────────────────────────────────────────────────────
 
 app.get('/api/oauth/start', (req, res) => { res.redirect(buildAuthUrl(makeState())) })
@@ -75,10 +89,8 @@ app.get('/api/oauth/callback', async (req, res) => {
     const now = Math.floor(Date.now() / 1000)
     saveSession(sessionId, { refreshToken: tokens.refresh_token, accessToken: tokens.access_token, accessTokenExp: now + tokens.expires_in, googleEmail: email })
     res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true, secure: IS_PROD, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 24 * 90 })
-    // v2.1: clear reauth flag — user just re-consented with updated scopes
     if (email) setNeedsReauthScope(email, false)
     res.redirect('/')
-    // v2.5: trigger verification pass in background after fresh login (don't await)
     if (email) {
       setImmediate(() => runVerificationPass(email, getValidAccessToken).catch(err =>
         console.error('[verifier] login-triggered pass failed:', err.message)
@@ -97,7 +109,6 @@ app.get('/api/me', (req, res) => {
   res.json({ authenticated: true, email: session.google_email || null })
 })
 
-// v2.6: scope status — tells frontend if re-login is needed for new scopes
 app.get('/api/scope-status', requireSession, (req, res) => {
   res.json({ needsReauth: getNeedsReauthScope(req.sessionId) })
 })
@@ -107,6 +118,13 @@ app.post('/api/logout', (req, res) => {
   if (sessionId) deleteSession(sessionId)
   res.clearCookie(SESSION_COOKIE)
   res.json({ ok: true })
+})
+
+// ── Quota ─────────────────────────────────────────────────────────────────────
+// v2.8: returns today's Google API call count for the UI to display a warning
+// if we're approaching limits (informational only — worker handles 429 itself)
+app.get('/api/quota', requireSession, (req, res) => {
+  res.json({ date: new Date().toISOString().slice(0, 10), apiCalls: getQuotaToday() })
 })
 
 // ── Image proxy ───────────────────────────────────────────────────────────────
@@ -157,25 +175,30 @@ async function getOrCreateWorkingAlbum(sessionId) {
   return workingAlbumId
 }
 
+// v2.8: passes filename, fileSize, creationTime, pickerBaseUrl to createUploadRow
 app.post('/api/picker-session/:id/start-upload', requireSession, async (req, res) => {
-  const session = getSession(req.sessionId);
-  const email = session?.google_email || 'sumeet@yours.com';
+  const email           = sessionEmail(req)
   const pickerSessionId = req.params.id
-  const items = req.body?.items
+  const items           = req.body?.items
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'MISSING_ITEMS' })
   try {
     const albumId = await getOrCreateWorkingAlbum(req.sessionId)
     let enqueued = 0
     for (const item of items) {
       if (!item.id || !item.baseUrl) continue
-      const rowId = createUploadRow(req.sessionId, email, pickerSessionId, item.id, item.mimeType);
-      // const rowId = createUploadRow({
-      //   sessionId: req.sessionId, pickerSessionId,
-      //   pickerItemId: item.id, filename: item.filename || null,
-      //   fileSize: item.fileSize || null,
-      //   creationTime: item.mediaMetadata?.creationTime || null,
-      //   mimeType: item.mimeType || null,
-      // })
+      const rowId = createUploadRow(
+        req.sessionId,
+        email,
+        pickerSessionId,
+        item.id,
+        item.mimeType || null,
+        {
+          filename:      item.filename || null,
+          fileSize:      item.fileSize || null,
+          creationTime:  item.mediaMetadata?.creationTime || null,
+          pickerBaseUrl: item.baseUrl,              // persisted for restart recovery
+        }
+      )
       registerBaseUrl(rowId, item.baseUrl)
       registerRowContext(rowId, { sessionId: req.sessionId, albumIdForUploads: albumId })
       enqueued++
@@ -198,6 +221,7 @@ function rowToItem(r) {
     filename:       r.filename,
     ourMediaItemId: r.our_media_item_id,
     isDuplicate:    !!r.is_duplicate,
+    isLivePhoto:    !!r.is_live_photo,
     swipeDecision:  r.swipe_decision || null,
     exif: {
       dateTaken:   r.exif_date_taken,
@@ -216,9 +240,7 @@ app.get('/api/uploads/ready', requireSession, (req, res) => {
 })
 
 app.get('/api/uploads/all', requireSession, (req, res) => {
-  // v2.1: query by google_email (from current session) so photos persist across logout/re-login
-  const session = getSession(req.sessionId)
-  const email = session?.google_email
+  const email = sessionEmail(req)
   if (!email) return res.json({ items: [] })
   const rows = db.prepare(`
     SELECT * FROM uploads
@@ -229,24 +251,18 @@ app.get('/api/uploads/all', requireSession, (req, res) => {
   res.json({ items: rows.map(rowToItem) })
 })
 
-// v2.5: deleted photos — items detected as removed from Google Photos,
-// kept for 15 days then purged from DB automatically by verifier.
 app.get('/api/uploads/deleted', requireSession, (req, res) => {
-  const session = getSession(req.sessionId)
-  const email = session?.google_email
+  const email = sessionEmail(req)
   if (!email) return res.json({ items: [] })
-  const rows = getDeletedUploads(email)
-  res.json({ items: rows.map(rowToItem) })
+  res.json({ items: getDeletedUploads(email).map(rowToItem) })
 })
 
-// v2.7: per-item queue for the QueueDrawer — returns id, filename, status for all rows in session
 app.get('/api/uploads/queue', requireSession, (req, res) => {
   const { pickerSessionId } = req.query
   if (!pickerSessionId) return res.status(400).json({ error: 'MISSING_PICKER_SESSION_ID' })
   const rows = db.prepare(`
-    SELECT id, filename, status, mime_type FROM uploads
-    WHERE picker_session_id = ?
-    ORDER BY id ASC
+    SELECT id, filename, status, mime_type, is_live_photo FROM uploads
+    WHERE picker_session_id = ? ORDER BY id ASC
   `).all(String(pickerSessionId))
   res.json({ items: rows })
 })
@@ -260,8 +276,7 @@ app.post('/api/uploads/:id/retry', requireSession, (req, res) => {
   res.json({ ok: true })
 })
 
-// ── Album drawer — v2.3 ───────────────────────────────────────────────────────
-// GET /api/albums — returns Good/Bad/Duplicates summaries for the drawer
+// ── Album drawer ──────────────────────────────────────────────────────────────
 app.get('/api/albums', requireSession, (req, res) => {
   res.json({ albums: getAlbumSummaries(req.sessionId) })
 })
@@ -279,34 +294,26 @@ app.post('/api/cleanup', requireSession, async (req, res) => {
 })
 
 // ── Swipe routing ─────────────────────────────────────────────────────────────
-const albumIdCache = new Map()
-
-
-
 async function getOrCreateNamedAlbum(sessionId, albumTitle) {
-  const session = getSession(sessionId);
-  if (!session || !session.google_email) throw new Error('No user email for album caching');
-  const email = session.google_email;
-
-  // 1. Check permanent database cache first
-  let albumId = getCachedAlbumId(email, albumTitle);
-  if (albumId) return albumId;
-
-  // 2. If missing, create it via Google API
-  const accessToken = await getValidAccessToken(sessionId);
-  const album = await createAlbum(accessToken, albumTitle);
-  
-  // 3. Save permanently
-  setCachedAlbumId(email, albumTitle, album.id);
-  return album.id;
+  const session = getSession(sessionId)
+  if (!session?.google_email) throw new Error('No user email for album caching')
+  const email = session.google_email
+  let albumId = getCachedAlbumId(email, albumTitle)
+  if (albumId) return albumId
+  const accessToken = await getValidAccessToken(sessionId)
+  const album = await createAlbum(accessToken, albumTitle)
+  setCachedAlbumId(email, albumTitle, album.id)
+  return album.id
 }
 
+// v2.8: lookup by email (not sessionId) — survives session rotation
 app.post('/api/swipe', requireSession, async (req, res) => {
   const { ourMediaItemId, decision } = req.body || {}
   if (!ourMediaItemId || !['good', 'bad', 'skip'].includes(decision)) {
     return res.status(400).json({ error: 'INVALID_BODY' })
   }
-  const row = getUploadByOurMediaItemId(req.sessionId, ourMediaItemId)
+  const email = sessionEmail(req)
+  const row   = email ? getUploadByOurMediaItemId(email, ourMediaItemId) : null
   if (!row) return res.status(404).json({ error: 'NOT_FOUND' })
 
   if (row.is_duplicate) {
@@ -322,6 +329,7 @@ app.post('/api/swipe', requireSession, async (req, res) => {
     const albumId    = await getOrCreateNamedAlbum(req.sessionId, albumTitle)
     const at         = await getValidAccessToken(req.sessionId)
     await batchAddMediaItems(at, albumId, [ourMediaItemId])
+    incrementQuotaLog(1)
     console.log(`[Swipe] ${ourMediaItemId.slice(0, 20)}… → "${albumTitle}" ✓`)
     res.json({ ok: true, decision, albumId })
   } catch (err) {
@@ -339,7 +347,7 @@ app.get('/api/swipe-decisions', requireSession, (req, res) => {
   res.json({ decisions: rows })
 })
 
-// v2.5: cron job — verify deleted photos every 2 hours for all active users
+// ── Cron ──────────────────────────────────────────────────────────────────────
 cron.schedule('0 */2 * * *', () => {
   console.log('[cron] running 2-hourly verification pass')
   runVerificationPassForAllUsers(getValidAccessToken).catch(err =>
@@ -348,4 +356,4 @@ cron.schedule('0 */2 * * *', () => {
 })
 console.log('[server] cron scheduled: deleted-photo verification every 2 hours')
 
-app.listen(PORT, () => console.log(`[server] Photo Curator backend v2.5 listening on :${PORT}`))
+app.listen(PORT, () => console.log(`[server] Photo Curator backend v2.8 listening on :${PORT}`))

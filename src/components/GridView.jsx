@@ -1,7 +1,10 @@
-// GridView.jsx — v2.4
+// GridView.jsx — v2.5
 // PURPOSE: Chronological grid of curated photos.
-// v2.4: added "Deleted from Google Photos" section at bottom of grid.
-//   Items shown at 60% opacity with 🗑 badge; excluded from swipe stack.
+// v2.5 changes:
+//   - "Add More Photos" button moved to header (fixed, non-scrolling)
+//   - "Clear Session" moved to bottom of scroll area with double-confirmation
+//     (first click: turns red + asks "Tap again to confirm"; second click: executes)
+//   - Both buttons disabled while picker is active / upload in progress
 
 import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -28,7 +31,8 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
     swipeDecisions, deletedItems,
   } = useAppStore()
 
-  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [drawerOpen,    setDrawerOpen]    = useState(false)
+  const [clearPending,  setClearPending]  = useState(false)  // double-confirm state
 
   const openSwipe = (index) => { setCurrentIndex(index); setView('swipe') }
   const statusMsg  = PICKER_LABELS[pickerState]
@@ -39,7 +43,7 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
 
   const groups = applyGrouping(items, sortGroup, swipeDecisions, activeAlbum)
 
-  // Build flat indexed list for swipe navigation
+  // Build flat indexed list matching useSwipeActions activeItems order
   let runningIndex = 0
   const groupsWithIndex = groups.map(group => {
     const startIndex = runningIndex
@@ -49,12 +53,22 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
 
   const ALBUM_LABEL = { good: 'Good', bad: 'Bad', duplicate: 'Duplicates' }
 
+  function handleClearSession() {
+    if (!clearPending) {
+      setClearPending(true)
+      // Auto-cancel after 4 seconds if not confirmed
+      setTimeout(() => setClearPending(false), 4000)
+      return
+    }
+    setClearPending(false)
+    onClearSession()
+  }
+
   return (
     <div className={styles.root}>
       <header className={styles.header}>
         <div className={styles.headerInner}>
           {activeAlbum ? (
-            // Album filter header
             <>
               <button className={styles.iconBtn} onClick={() => setActiveAlbum(null)} title="All photos">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -69,6 +83,21 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
 
           <div className={styles.headerActions}>
             {hasItems && <span className={styles.count}>{items.length} photos</span>}
+
+            {/* Add More Photos — fixed in header, always visible when items exist */}
+            {hasItems && !activeAlbum && (
+              <button
+                className={styles.addMoreBtn}
+                onClick={onAddMorePhotos}
+                disabled={isWorking || hasUploadActivity}
+                title="Add more photos"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+                Add
+              </button>
+            )}
 
             {/* Albums drawer trigger */}
             <button className={styles.iconBtn} onClick={() => setDrawerOpen(true)} title="Albums">
@@ -162,7 +191,7 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
           </section>
         ))}
 
-        {/* Deleted from Google Photos — shown below all normal groups, not swipeable */}
+        {/* Deleted from Google Photos */}
         {!activeAlbum && deletedItems.length > 0 && (
           <section className={styles.group}>
             <h2 className={styles.dateLabel} style={{ color: 'var(--text-3)', fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
@@ -176,12 +205,41 @@ export default function GridView({ onSignOut, pickerState, onPickPhotos, onAddMo
           </section>
         )}
 
+        {/* Clear Session — bottom of scroll, double-confirmation */}
         {hasItems && !activeAlbum && (
           <div className={styles.bottomActions}>
-            <button className={styles.secondaryBtn} onClick={onAddMorePhotos} disabled={isWorking}>+ Add More Photos</button>
-            <button className={styles.dangerBtn}    onClick={onClearSession}  disabled={isWorking}>Clear Session</button>
+            <AnimatePresence mode="wait">
+              {clearPending ? (
+                <motion.button
+                  key="confirm"
+                  className={styles.dangerBtnConfirm}
+                  onClick={handleClearSession}
+                  disabled={isWorking}
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  ⚠ Tap again to confirm — this cannot be undone
+                </motion.button>
+              ) : (
+                <motion.button
+                  key="clear"
+                  className={styles.dangerBtn}
+                  onClick={handleClearSession}
+                  disabled={isWorking}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  Clear Session
+                </motion.button>
+              )}
+            </AnimatePresence>
           </div>
         )}
+
         <div style={{ height: 1 }}/>
       </div>
 
@@ -213,6 +271,9 @@ function GridThumb({ item, index, onOpen }) {
       {src
         ? <img src={src} alt={item.filename || ''} className={styles.thumbImg} loading="lazy" onError={(e) => { e.target.style.opacity='0.3' }}/>
         : <div className={styles.thumbImg} style={{ background:'var(--bg-3)' }}/>}
+      {item.isLivePhoto && (
+        <div className={styles.livePhotoBadge} title="Live Photo">◎</div>
+      )}
       {item.mediaMetadata?.video && <div className={styles.videoIcon}>▶</div>}
       <AlbumDot decision={decision} />
     </motion.button>
@@ -226,11 +287,7 @@ function DeletedThumb({ item }) {
       {src
         ? <img src={src} alt={item.filename || ''} className={styles.thumbImg} loading="lazy" onError={(e) => { e.target.style.opacity='0.3' }}/>
         : <div className={styles.thumbImg} style={{ background:'var(--bg-3)' }}/>}
-      <div style={{
-        position: 'absolute', bottom: 4, right: 4,
-        fontSize: 12, lineHeight: 1,
-        background: 'rgba(0,0,0,0.55)', borderRadius: 4, padding: '2px 3px',
-      }}>🗑</div>
+      <div style={{ position:'absolute', bottom:4, right:4, fontSize:12, lineHeight:1, background:'rgba(0,0,0,0.55)', borderRadius:4, padding:'2px 3px' }}>🗑</div>
     </div>
   )
 }

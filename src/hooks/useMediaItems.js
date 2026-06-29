@@ -1,7 +1,9 @@
-// useMediaItems.js — v2.4
+// useMediaItems.js — v2.5
 // PURPOSE: Picker session lifecycle + upload pipeline management.
-// v2.4: fetches /api/uploads/deleted on mount alongside all uploads;
-//   stores result in deletedItems Zustand slice.
+// v2.5: mapReadyItem now passes isLivePhoto through from backend rowToItem,
+//   so GridView can show the Live Photo badge and SwipeCard can label them.
+//   No other logic changes.
+// v2.4: fetches /api/uploads/deleted on mount alongside all uploads.
 // v2.3: fires dupeToast on duplicate detection during upload polling.
 
 import { useCallback, useEffect, useRef } from 'react'
@@ -25,6 +27,7 @@ function mapReadyItem(r) {
     pickerItemId:   r.pickerItemId,
     filename:       r.filename,
     isDuplicate:    r.isDuplicate,
+    isLivePhoto:    r.isLivePhoto || false,   // v2.5: Live Photo flag
     swipeDecision:  r.swipeDecision || null,
     mediaMetadata: {
       creationTime: r.exif?.dateTaken || null,
@@ -67,18 +70,14 @@ export function useMediaItems() {
         ])
         setUploadStatus(status)
 
-        // Update queue drawer items; schedule removal of 'done' items after 2s
         setQueueItems(prev => {
-          // Merge: keep failed items already in store even if they drop off the queue
-          const prevFailed = (prev || []).filter(i => i.status === 'failed')
+          const prevFailed    = (prev || []).filter(i => i.status === 'failed')
           const prevFailedIds = new Set(prevFailed.map(i => i.id))
-          const merged = [
+          return [
             ...queue.filter(i => !prevFailedIds.has(i.id)),
             ...prevFailed.filter(i => !queue.find(q => q.id === i.id)),
           ]
-          return merged
         })
-        // Schedule removal of newly-done items after 2s
         const doneIds = queue.filter(i => i.status === 'done').map(i => i.id)
         if (doneIds.length > 0) {
           setTimeout(() => {
@@ -91,18 +90,16 @@ export function useMediaItems() {
           for (const r of newOnes) seenReadyIdsRef.current.add(r.uploadId)
           const mapped = newOnes.map(mapReadyItem)
           appendItems(mapped)
-          // Show corner toast if any of the new batch are duplicates
           const dupeCount = newOnes.filter(r => r.isDuplicate).length
           if (dupeCount > 0) {
             const { showDupeToast, hideDupeToast } = useAppStore.getState()
             showDupeToast(dupeCount)
             setTimeout(() => hideDupeToast(), 5000)
           }
-          // Seed swipeDecisions for any already-decided items
-          const { swipeDecisions, setSwipeDecisions } = useAppStore.getState()
+          const { swipeDecisions, setSwipeDecisions: sd } = useAppStore.getState()
           const updates = { ...swipeDecisions }
           for (const item of mapped) if (item.swipeDecision) updates[item.id] = item.swipeDecision
-          setSwipeDecisions(updates)
+          sd(updates)
         }
 
         const total = status.pending + status.downloading + status.uploading + status.done + status.failed
@@ -183,7 +180,7 @@ export function useMediaItems() {
     }
   }, [startPolling, setPickerState, setPickerError])
 
-  // v2.3 (updated v2.5): on mount, restore all uploads + deleted items from backend
+  // On mount: restore all uploads + deleted items from backend
   useEffect(() => {
     if (authState !== 'authenticated') return
     ;(async () => {
@@ -208,7 +205,6 @@ export function useMediaItems() {
       } catch (err) {
         console.error('[mount] restore failed:', err.message)
       }
-      // Resume any in-flight picker session
       const pending = getStoredPickerSession()
       if (pending) { sessionRef.current = pending; startPolling(pending, true) }
     })()
