@@ -1,7 +1,13 @@
-// useSwipeActions.js — v2.3
+// useSwipeActions.js — v2.4
 // PURPOSE: Swipe gesture handling + album write queue.
-// v2.3: when activeAlbum is set, swipe view starts from first unreviewed
-// photo in the filtered set. "Unreviewed" means no swipe decision yet.
+// Changelog:
+//   v2.4: currentIndex now always indexes activeItems (filtered+sorted list),
+//         not raw items[]. This is the correct contract — GridView v2.9 sets
+//         currentIndex to the position in activeItems when opening swipe,
+//         so both sides agree on what currentIndex means.
+//         Keyboard shortcuts added: Q=Good, D=Bad, ArrowUp/ArrowRight=Skip,
+//         ArrowDown/ArrowLeft=Prev. Attached to window in swipe view.
+//   v2.3: when activeAlbum is set, start from first unreviewed photo in filtered set.
 
 import { useCallback, useRef, useEffect, useState } from 'react'
 import { recordSwipe } from '../lib/backendApi.js'
@@ -28,20 +34,25 @@ export function useSwipeActions() {
     items, currentIndex, setCurrentIndex, addSwipeResult,
     authState, updateSwipeDecision,
     sortGroup, swipeDecisions, activeAlbum,
+    processedIds,
   } = useAppStore()
 
   const queue      = useRef(loadQueue())
   const processing = useRef(false)
   const retryTimer = useRef(null)
-  const [writeError,   setWriteError]   = useState(null)
-  const [pendingCount, setPendingCount] = useState(queue.current.length)
+  const [writeError,    setWriteError]    = useState(null)
+  const [pendingCount,  setPendingCount]  = useState(queue.current.length)
+  const [showShortcuts, setShowShortcuts] = useState(false)
 
-  // Compute the active item list — filtered+sorted the same way as GridView
-  const activeItems = activeAlbum
-    ? applyGrouping(items, sortGroup, swipeDecisions, activeAlbum).flatMap(g => g.items)
-    : items
+  // ── Active item list ───────────────────────────────────────────────────────
+  // Identical computation to GridView v2.9 — both sides must use the same list
+  // so that currentIndex (set by GridView.openSwipe) correctly addresses the
+  // same photo here.
+  const activeItems = activeAlbum === 'processed'
+    ? items.filter(item => processedIds?.has(item.id))
+    : applyGrouping(items, sortGroup, swipeDecisions, activeAlbum).flatMap(g => g.items)
 
-  // On mount when activeAlbum is set, start from first unreviewed photo
+  // On mount when activeAlbum filter changes, start from first unreviewed photo
   useEffect(() => {
     if (!activeAlbum) return
     const firstUnreviewed = activeItems.findIndex(item => {
@@ -49,8 +60,10 @@ export function useSwipeActions() {
       return !dec
     })
     setCurrentIndex(firstUnreviewed >= 0 ? firstUnreviewed : 0)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeAlbum])
 
+  // ── Queue processor ────────────────────────────────────────────────────────
   const processQueue = useCallback(async () => {
     if (processing.current || authState !== 'authenticated') return
     if (queue.current.length === 0) return
@@ -91,10 +104,12 @@ export function useSwipeActions() {
     processQueue()
   }, [processQueue, updateSwipeDecision])
 
+  // ── Navigation helpers ─────────────────────────────────────────────────────
   const total  = activeItems.length
   const goNext = useCallback(() => setCurrentIndex(currentIndex + 1), [currentIndex, setCurrentIndex])
   const goPrev = useCallback(() => { if (currentIndex > 0) setCurrentIndex(currentIndex - 1) }, [currentIndex, setCurrentIndex])
 
+  // ── Swipe actions ──────────────────────────────────────────────────────────
   const swipeRight = useCallback(() => {
     const item = activeItems[currentIndex]; if (!item) return
     enqueue(item.id, item.ourMediaItemId, 'good', ALBUM_GOOD)
@@ -116,10 +131,40 @@ export function useSwipeActions() {
 
   const swipeDown = useCallback(() => goPrev(), [goPrev])
 
+  // ── Keyboard shortcuts (§2.4 #17) ─────────────────────────────────────────
+  // Q=Good, D=Bad, ArrowUp/ArrowRight=Skip, ArrowDown/ArrowLeft=Prev
+  // Attached at window level so focus doesn't need to be on the card.
+  // Ignored when a modifier key is held or when an input element is focused.
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      const tag = document.activeElement?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+
+      if (e.key === '?') { setShowShortcuts(v => !v); return }
+
+      const map = {
+        q:           swipeRight,
+        d:           swipeLeft,
+        ArrowUp:     swipeUp,
+        ArrowRight:  swipeUp,
+        ArrowDown:   swipeDown,
+        ArrowLeft:   swipeDown,
+      }
+      if (map[e.key]) {
+        e.preventDefault()
+        map[e.key]()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [swipeRight, swipeLeft, swipeUp, swipeDown])
+
   return {
     swipeRight, swipeLeft, swipeUp, swipeDown,
     currentIndex, total,
     writeError, pendingCount,
     activeItems,
+    showShortcuts, setShowShortcuts,
   }
 }

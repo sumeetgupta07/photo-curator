@@ -57,3 +57,15 @@
 
 .bottomActions { display:flex; gap:12px; padding:24px 16px 40px; justify-content:center; flex-wrap:wrap; }
 .fab { position:fixed; bottom:calc(24px + var(--safe-bottom)); right:20px; z-index:20; display:flex; align-items:center; gap:8px; padding:16px 22px; background:var(--accent); color:#1a1a1a; border-radius:100px; font-size:16px; font-weight:600; box-shadow:0 4px 20px rgba(0,0,0,0.4); }
+
+/* v2.9: pill bar for sort+filter (replaces separate sortRow) */
+.pillBar { display:flex; gap:6px; padding:0 12px 10px; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; align-items:center; flex-wrap:nowrap; }
+.pillBar::-webkit-scrollbar { display:none; }
+.pillGroup { display:flex; gap:4px; flex-shrink:0; }
+.pillDivider { width:1px; height:20px; background:var(--border); flex-shrink:0; margin:0 2px; }
+.pill { flex-shrink:0; padding:5px 12px; border-radius:100px; font-size:12px; font-weight:500; color:var(--text-2); background:var(--bg-3); border:1px solid var(--border); transition:all 0.15s; white-space:nowrap; }
+.pill:active { opacity:0.7; }
+.pillActive { color:var(--bg); background:var(--accent); border-color:var(--accent); }
+
+/* v2.9: processed items shown at reduced opacity */
+.thumbProcessed { opacity:0.5; }

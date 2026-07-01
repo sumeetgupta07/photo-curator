@@ -1,5 +1,10 @@
-// SwipeCard.jsx — v2.2
+// SwipeCard.jsx — v2.3
 // PURPOSE: Draggable swipe card for the current photo.
+// v2.3: removed local onKeyDown handler (handleKey + tabIndex). It mapped
+// ArrowRight→Good / ArrowLeft→Bad, which conflicts with the new window-level
+// shortcut scheme in useSwipeActions v2.4 (Q=Good, D=Bad, ArrowUp/Right=Skip,
+// ArrowDown/Left=Prev, per §2.4 #17). Keyboard input is now handled once,
+// globally, in useSwipeActions — no card focus required.
 // v2.2: shows AlbumDot badge bottom-right reflecting current swipe decision.
 // Uses item.id (uploadId) for local thumb URL.
 import React, { useState } from 'react'
@@ -45,22 +50,13 @@ export default function SwipeCard({ item, onSwipeRight, onSwipeLeft, onSwipeUp, 
       else await snapBack()
     }
   }
-  function handleKey(e) {
-    const map = {
-      ArrowRight: async () => { await flyOff('right'); onSwipeRight() },
-      ArrowLeft:  async () => { await flyOff('left');  onSwipeLeft()  },
-      ArrowUp:    async () => { await flyOff('up');    onSwipeUp()    },
-      ArrowDown:  async () => { await flyOff('down');  onSwipeDown()  },
-    }
-    if (map[e.key]) { e.preventDefault(); map[e.key]() }
-  }
 
   return (
     <motion.div className={styles.card} drag dragConstraints={{ top:0,bottom:0,left:0,right:0 }} dragElastic={0.7}
       style={{ x, y, rotate }} animate={controls} initial={{ scale:1, opacity:1 }}
       exit={{ opacity:0, scale:0.8, transition:{ duration:0.15 } }}
       onDragStart={() => setIsDragging(true)} onDragEnd={handleDragEnd}
-      tabIndex={0} onKeyDown={handleKey} whileTap={{ cursor:'grabbing' }}>
+      whileTap={{ cursor:'grabbing' }}>
       {src
         ? <img src={src} alt={item.filename || ''} className={styles.photo} draggable={false} onError={() => console.error('[Image] failed:', src?.slice(0,80))}/>
         : <div className={styles.photo} style={{ background:'var(--bg-3)' }}/>}

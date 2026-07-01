@@ -1,16 +1,30 @@
-// db.js — v2.8
+// db.js — v2.11
 // PURPOSE: SQLite storage for Photo Curator backend.
+// v2.11 changes:
+//   - Added curation_sessions table (id, google_email, name, is_active,
+//     created_at, updated_at). One row per named curation session per user.
+//     Exactly one row per user has is_active=1 at any time.
+//   - Added curation_session_id column to uploads. Each upload row belongs
+//     to one named session.
+//   - Migration: on first boot, all existing uploads rows with no
+//     curation_session_id are adopted into an auto-created session named
+//     after the date of their earliest row ("Session — <date>").
+//   - getUploadsForActiveSession(email): replaces the old /api/uploads/all
+//     query — returns only uploads belonging to the active session.
+//   - New helpers: createCurationSession, getActiveCurationSession,
+//     listCurationSessions, setActiveCurationSession, renameCurationSession,
+//     deleteCurationSession (blocks if session is active).
+// v2.10 changes:
+//   - Added deleteCachedAlbumId for stale album self-healing.
+//   - Added getBandwidthToday.
+// v2.9 changes:
+//   - Added getBandwidthToday(email).
 // v2.8 changes:
-//   - createUploadRow: restored filename, file_size, creation_time fields
-//     (were dropped in v2.4 refactor — caused "null" filename bug throughout)
-//   - createUploadRow: added picker_base_url column (for true resumability
-//     across backend restarts — baseUrl persisted immediately on enqueue)
-//   - createUploadRow: added is_live_photo + live_photo_mov_size columns
-//   - getUploadByOurMediaItemId: now queries by google_email (not session_id)
-//     — fixes /api/swipe 404 after session rotation
-//   - findDuplicateByHash: excludes deleted items from hash comparison
-//   - Added quota_log table + helpers for Google API 429 tracking
-//   - Safe migration entries for all new columns
+//   - createUploadRow: restored filename/fileSize/creationTime; added
+//     picker_base_url, is_live_photo, live_photo_mov_size.
+//   - getUploadByOurMediaItemId: query by google_email.
+//   - findDuplicateByHash: excludes deleted items.
+//   - Added quota_log table.
 
 import Database from 'better-sqlite3'
 import path from 'node:path'
@@ -22,7 +36,7 @@ const DB_PATH = path.join(__dirname, '..', 'data', 'photo-curator.db')
 export const db = new Database(DB_PATH)
 db.pragma('journal_mode = WAL')
 
-// 1. Core tables
+// ── 1. Core tables ────────────────────────────────────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     session_id       TEXT PRIMARY KEY,
@@ -34,37 +48,47 @@ db.exec(`
     updated_at       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
   );
 
+  CREATE TABLE IF NOT EXISTS curation_sessions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    google_email TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    is_active    INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+  );
+
   CREATE TABLE IF NOT EXISTS uploads (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id          TEXT NOT NULL,
-    google_email        TEXT,
-    picker_session_id   TEXT NOT NULL,
-    picker_item_id      TEXT NOT NULL,
-    filename            TEXT,
-    file_size           INTEGER,
-    creation_time       TEXT,
-    mime_type           TEXT,
-    status              TEXT NOT NULL DEFAULT 'pending',
-    picker_base_url     TEXT,
-    our_media_item_id   TEXT,
-    swipe_decision      TEXT,
-    is_duplicate        INTEGER NOT NULL DEFAULT 0,
-    duplicate_of_id     INTEGER,
-    is_live_photo       INTEGER NOT NULL DEFAULT 0,
-    live_photo_mov_size INTEGER,
-    dhash               TEXT,
-    exif_raw            TEXT,
-    exif_date_taken     TEXT,
-    exif_gps_lat        REAL,
-    exif_gps_lon        REAL,
-    exif_camera_make    TEXT,
-    exif_camera_model   TEXT,
-    error_message       TEXT,
-    retry_count         INTEGER NOT NULL DEFAULT 0,
-    deleted_at          INTEGER,
-    last_verified_at    INTEGER,
-    created_at          INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at          INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id            TEXT NOT NULL,
+    google_email          TEXT,
+    curation_session_id   INTEGER,
+    picker_session_id     TEXT NOT NULL,
+    picker_item_id        TEXT NOT NULL,
+    filename              TEXT,
+    file_size             INTEGER,
+    creation_time         TEXT,
+    mime_type             TEXT,
+    status                TEXT NOT NULL DEFAULT 'pending',
+    picker_base_url       TEXT,
+    our_media_item_id     TEXT,
+    swipe_decision        TEXT,
+    is_duplicate          INTEGER NOT NULL DEFAULT 0,
+    duplicate_of_id       INTEGER,
+    is_live_photo         INTEGER NOT NULL DEFAULT 0,
+    live_photo_mov_size   INTEGER,
+    dhash                 TEXT,
+    exif_raw              TEXT,
+    exif_date_taken       TEXT,
+    exif_gps_lat          REAL,
+    exif_gps_lon          REAL,
+    exif_camera_make      TEXT,
+    exif_camera_model     TEXT,
+    error_message         TEXT,
+    retry_count           INTEGER NOT NULL DEFAULT 0,
+    deleted_at            INTEGER,
+    last_verified_at      INTEGER,
+    created_at            INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at            INTEGER NOT NULL DEFAULT (strftime('%s','now'))
   );
 
   CREATE TABLE IF NOT EXISTS user_albums (
@@ -81,9 +105,9 @@ db.exec(`
   );
 `)
 
-// 2. Safe migrations for existing DBs
+// ── 2. Safe column migrations ─────────────────────────────────────────────────
 const existingCols = db.prepare('PRAGMA table_info(uploads)').all().map(r => r.name)
-const migrations = [
+const colMigrations = [
   ['swipe_decision',      'ALTER TABLE uploads ADD COLUMN swipe_decision TEXT'],
   ['our_media_item_id',   'ALTER TABLE uploads ADD COLUMN our_media_item_id TEXT'],
   ['is_duplicate',        'ALTER TABLE uploads ADD COLUMN is_duplicate INTEGER NOT NULL DEFAULT 0'],
@@ -106,38 +130,81 @@ const migrations = [
   ['picker_base_url',     'ALTER TABLE uploads ADD COLUMN picker_base_url TEXT'],
   ['is_live_photo',       'ALTER TABLE uploads ADD COLUMN is_live_photo INTEGER NOT NULL DEFAULT 0'],
   ['live_photo_mov_size', 'ALTER TABLE uploads ADD COLUMN live_photo_mov_size INTEGER'],
+  ['curation_session_id', 'ALTER TABLE uploads ADD COLUMN curation_session_id INTEGER'],
 ]
-
-const sessionCols = db.prepare('PRAGMA table_info(sessions)').all().map(r => r.name)
-const sessionMigrations = [
-  ['needs_reauth_scope', 'ALTER TABLE sessions ADD COLUMN needs_reauth_scope INTEGER NOT NULL DEFAULT 0'],
-]
-for (const [col, sql] of sessionMigrations) {
-  if (!sessionCols.includes(col)) {
-    try { db.exec(sql) } catch (e) { console.warn('[db] session migration skipped:', e.message) }
-  }
-}
-for (const [col, sql] of migrations) {
+for (const [col, sql] of colMigrations) {
   if (!existingCols.includes(col)) {
     try { db.exec(sql) } catch (e) { console.warn('[db] migration skipped:', e.message) }
   }
 }
 
-// 3. Indexes
+const sessionCols = db.prepare('PRAGMA table_info(sessions)').all().map(r => r.name)
+if (!sessionCols.includes('needs_reauth_scope')) {
+  try { db.exec('ALTER TABLE sessions ADD COLUMN needs_reauth_scope INTEGER NOT NULL DEFAULT 0') } catch {}
+}
+
+// ── 3. Indexes ────────────────────────────────────────────────────────────────
 db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_uploads_picker_session ON uploads(picker_session_id);
-  CREATE INDEX IF NOT EXISTS idx_uploads_status         ON uploads(status);
-  CREATE INDEX IF NOT EXISTS idx_uploads_dedup          ON uploads(filename, file_size, creation_time);
-  CREATE INDEX IF NOT EXISTS idx_uploads_dhash          ON uploads(dhash);
-  CREATE INDEX IF NOT EXISTS idx_uploads_date_taken     ON uploads(exif_date_taken);
-  CREATE INDEX IF NOT EXISTS idx_uploads_decision       ON uploads(swipe_decision);
-  CREATE INDEX IF NOT EXISTS idx_uploads_deleted        ON uploads(deleted_at);
-  CREATE INDEX IF NOT EXISTS idx_uploads_verified       ON uploads(last_verified_at);
-  CREATE INDEX IF NOT EXISTS idx_uploads_email          ON uploads(google_email);
+  CREATE INDEX IF NOT EXISTS idx_uploads_picker_session  ON uploads(picker_session_id);
+  CREATE INDEX IF NOT EXISTS idx_uploads_status          ON uploads(status);
+  CREATE INDEX IF NOT EXISTS idx_uploads_dedup           ON uploads(filename, file_size, creation_time);
+  CREATE INDEX IF NOT EXISTS idx_uploads_dhash           ON uploads(dhash);
+  CREATE INDEX IF NOT EXISTS idx_uploads_date_taken      ON uploads(exif_date_taken);
+  CREATE INDEX IF NOT EXISTS idx_uploads_decision        ON uploads(swipe_decision);
+  CREATE INDEX IF NOT EXISTS idx_uploads_deleted         ON uploads(deleted_at);
+  CREATE INDEX IF NOT EXISTS idx_uploads_verified        ON uploads(last_verified_at);
+  CREATE INDEX IF NOT EXISTS idx_uploads_email           ON uploads(google_email);
+  CREATE INDEX IF NOT EXISTS idx_uploads_curation_sess   ON uploads(curation_session_id);
+  CREATE INDEX IF NOT EXISTS idx_curation_sessions_email ON curation_sessions(google_email);
 `)
 
-// ── Sessions ──────────────────────────────────────────────────────────────────
+// ── 4. v2.11 bootstrap migration ─────────────────────────────────────────────
+// For each google_email that has uploads with no curation_session_id, create
+// one curation session named after the earliest upload date and adopt all
+// orphaned rows into it.  Runs once; subsequent boots skip (rows already set).
+function bootstrapCurationSessions() {
+  const emails = db.prepare(`
+    SELECT DISTINCT google_email FROM uploads
+    WHERE google_email IS NOT NULL AND curation_session_id IS NULL
+  `).all().map(r => r.google_email)
 
+  for (const email of emails) {
+    // Already has an active session? Adopt into it.
+    const existing = db.prepare(
+      `SELECT id FROM curation_sessions WHERE google_email = ? AND is_active = 1 LIMIT 1`
+    ).get(email)
+
+    let csId
+    if (existing) {
+      csId = existing.id
+    } else {
+      // Auto-name after earliest upload
+      const earliest = db.prepare(
+        `SELECT created_at FROM uploads WHERE google_email = ? ORDER BY id ASC LIMIT 1`
+      ).get(email)
+      const date = earliest
+        ? new Date(earliest.created_at * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        : 'Session 1'
+      const name = `Session — ${date}`
+      const result = db.prepare(
+        `INSERT INTO curation_sessions (google_email, name, is_active) VALUES (?, ?, 1)`
+      ).run(email, name)
+      csId = result.lastInsertRowid
+      console.log(`[db] v2.11 bootstrap: created curation session "${name}" (id=${csId}) for ${email}`)
+    }
+
+    // Adopt orphaned rows
+    const adopted = db.prepare(
+      `UPDATE uploads SET curation_session_id = ? WHERE google_email = ? AND curation_session_id IS NULL`
+    ).run(csId, email)
+    if (adopted.changes > 0) {
+      console.log(`[db] v2.11 bootstrap: adopted ${adopted.changes} uploads → curation session ${csId}`)
+    }
+  }
+}
+bootstrapCurationSessions()
+
+// ── OAuth sessions ────────────────────────────────────────────────────────────
 export function saveSession(sessionId, { googleEmail, refreshToken, accessToken, accessTokenExp }) {
   db.prepare(`
     INSERT INTO sessions (session_id, google_email, refresh_token, access_token, access_token_exp, updated_at)
@@ -150,36 +217,129 @@ export function saveSession(sessionId, { googleEmail, refreshToken, accessToken,
       updated_at = strftime('%s','now')
   `).run({ sessionId, googleEmail: googleEmail || null, refreshToken, accessToken: accessToken || null, accessTokenExp: accessTokenExp || null })
 }
-
 export function updateAccessToken(sessionId, accessToken, accessTokenExp) {
   db.prepare(`UPDATE sessions SET access_token = ?, access_token_exp = ?, updated_at = strftime('%s','now') WHERE session_id = ?`)
     .run(accessToken, accessTokenExp, sessionId)
 }
-
 export function getSession(sessionId) {
   return db.prepare('SELECT * FROM sessions WHERE session_id = ?').get(sessionId) || null
 }
-
 export function deleteSession(sessionId) {
   db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId)
 }
 
-// ── Uploads ───────────────────────────────────────────────────────────────────
+// ── Curation sessions ─────────────────────────────────────────────────────────
 
-// v2.8: restored filename/fileSize/creationTime; added pickerBaseUrl, isLivePhoto
+// Auto-name helper: "Session — Jun 30, 2026" with counter if same day already exists
+function autoSessionName(email) {
+  const base = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  const prefix = `Session — ${base}`
+  const existing = db.prepare(
+    `SELECT name FROM curation_sessions WHERE google_email = ? AND name LIKE ?`
+  ).all(email, `${prefix}%`)
+  if (existing.length === 0) return prefix
+  return `${prefix} (${existing.length + 1})`
+}
+
+// Create a new curation session. Does NOT change is_active — caller does that.
+export function createCurationSession(email, name = null) {
+  const sessionName = name || autoSessionName(email)
+  const result = db.prepare(
+    `INSERT INTO curation_sessions (google_email, name, is_active) VALUES (?, ?, 0)`
+  ).run(email, sessionName)
+  return { id: result.lastInsertRowid, name: sessionName }
+}
+
+export function getActiveCurationSession(email) {
+  return db.prepare(
+    `SELECT * FROM curation_sessions WHERE google_email = ? AND is_active = 1 LIMIT 1`
+  ).get(email) || null
+}
+
+export function listCurationSessions(email) {
+  return db.prepare(`
+    SELECT cs.*, COUNT(u.id) as photo_count
+    FROM curation_sessions cs
+    LEFT JOIN uploads u ON u.curation_session_id = cs.id
+      AND u.status = 'done' AND u.deleted_at IS NULL
+    WHERE cs.google_email = ?
+    GROUP BY cs.id
+    ORDER BY cs.created_at DESC
+  `).all(email)
+}
+
+// Switch active session: deactivate all for this user, activate target.
+// Returns false if targetId not found or belongs to different user.
+export function setActiveCurationSession(email, targetId) {
+  const row = db.prepare(
+    `SELECT id FROM curation_sessions WHERE id = ? AND google_email = ?`
+  ).get(targetId, email)
+  if (!row) return false
+  db.prepare(`UPDATE curation_sessions SET is_active = 0, updated_at = strftime('%s','now') WHERE google_email = ?`).run(email)
+  db.prepare(`UPDATE curation_sessions SET is_active = 1, updated_at = strftime('%s','now') WHERE id = ?`).run(targetId)
+  return true
+}
+
+export function renameCurationSession(email, sessionId, name) {
+  const result = db.prepare(
+    `UPDATE curation_sessions SET name = ?, updated_at = strftime('%s','now')
+     WHERE id = ? AND google_email = ?`
+  ).run(name, sessionId, email)
+  return result.changes > 0
+}
+
+// Delete: removes curation_sessions row + all uploads rows + thumbs (caller
+// handles thumb deletion). Blocks if session is currently active.
+// Returns { ok, reason } so caller can surface the error to the client.
+export function deleteCurationSession(email, sessionId) {
+  const row = db.prepare(
+    `SELECT id, is_active FROM curation_sessions WHERE id = ? AND google_email = ?`
+  ).get(sessionId, email)
+  if (!row) return { ok: false, reason: 'NOT_FOUND' }
+  if (row.is_active) return { ok: false, reason: 'ACTIVE_SESSION' }
+  const uploadIds = db.prepare(
+    `SELECT id FROM uploads WHERE curation_session_id = ?`
+  ).all(sessionId).map(r => r.id)
+  db.prepare(`DELETE FROM uploads WHERE curation_session_id = ?`).run(sessionId)
+  db.prepare(`DELETE FROM curation_sessions WHERE id = ?`).run(sessionId)
+  return { ok: true, uploadIds }
+}
+
+// Get upload IDs for a curation session (for thumb bulk-delete)
+export function getUploadIdsByCurationSession(curationSessionId) {
+  return db.prepare(`SELECT id FROM uploads WHERE curation_session_id = ?`)
+    .all(curationSessionId).map(r => r.id)
+}
+
+// ── Uploads ───────────────────────────────────────────────────────────────────
 export function createUploadRow(sessionId, email, pickerSessionId, pickerItemId, mimeType, {
   filename = null, fileSize = null, creationTime = null, pickerBaseUrl = null,
+  curationSessionId = null,
 } = {}) {
   return db.prepare(`
     INSERT INTO uploads
-      (session_id, google_email, picker_session_id, picker_item_id, mime_type,
+      (session_id, google_email, curation_session_id, picker_session_id, picker_item_id, mime_type,
        filename, file_size, creation_time, picker_base_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(sessionId, email, pickerSessionId, pickerItemId, mimeType,
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(sessionId, email, curationSessionId, pickerSessionId, pickerItemId, mimeType,
          filename, fileSize, creationTime, pickerBaseUrl).lastInsertRowid
 }
 
-// v2.8: exclude deleted items from hash comparison
+// v2.11: scoped to active curation session
+export function getUploadsForActiveSession(email) {
+  return db.prepare(`
+    SELECT u.* FROM uploads u
+    JOIN curation_sessions cs ON cs.id = u.curation_session_id
+    WHERE u.google_email = ?
+      AND cs.is_active = 1
+      AND u.status = 'done'
+      AND u.our_media_item_id IS NOT NULL
+      AND u.is_duplicate = 0
+      AND u.deleted_at IS NULL
+    ORDER BY u.id ASC
+  `).all(email)
+}
+
 export function findDuplicateByHash(email, dhash) {
   if (!dhash) return null
   return db.prepare(`
@@ -235,8 +395,6 @@ export function getUploadStatusCounts(pickerSessionId) {
   return counts
 }
 
-// v2.8: fixed — query by google_email instead of session_id
-// Prevents /api/swipe 404 after session rotation (user logged out + back in)
 export function getUploadByOurMediaItemId(email, ourMediaItemId) {
   return db.prepare(`
     SELECT * FROM uploads
@@ -270,83 +428,79 @@ export function getAlbumSummaries(sessionId) {
   })
 }
 
+// ── Album cache ───────────────────────────────────────────────────────────────
 export function getCachedAlbumId(email, title) {
   if (!email) return null
   const row = db.prepare('SELECT album_id FROM user_albums WHERE google_email = ? AND album_title = ?').get(email, title)
   return row ? row.album_id : null
 }
-
 export function setCachedAlbumId(email, title, id) {
   if (!email) return
   db.prepare('INSERT OR REPLACE INTO user_albums (google_email, album_title, album_id) VALUES (?, ?, ?)').run(email, title, id)
 }
-
-export function getUploadsByUserEmail(email) {
-  if (!email) return []
-  return db.prepare(`SELECT * FROM uploads WHERE google_email = ? ORDER BY creation_time ASC`).all(email)
+export function deleteCachedAlbumId(email, title) {
+  if (!email) return
+  db.prepare('DELETE FROM user_albums WHERE google_email = ? AND album_title = ?').run(email, title)
 }
 
-// ── Verifier helpers ──────────────────────────────────────────────────────────
+// ── Bandwidth ─────────────────────────────────────────────────────────────────
+export function getBandwidthToday(email) {
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(file_size), 0) as bytes
+    FROM uploads
+    WHERE google_email = ? AND status = 'done'
+      AND date(updated_at, 'unixepoch') = date('now')
+  `).get(email)
+  return row?.bytes || 0
+}
 
+// ── Verifier ──────────────────────────────────────────────────────────────────
 export function getItemsForVerification(email, limit = 10) {
   const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200
   return db.prepare(`
     SELECT id, our_media_item_id FROM uploads
-    WHERE google_email = ?
-      AND status = 'done' AND our_media_item_id IS NOT NULL
+    WHERE google_email = ? AND status = 'done' AND our_media_item_id IS NOT NULL
       AND is_duplicate = 0 AND deleted_at IS NULL
       AND (last_verified_at IS NULL OR last_verified_at < ?)
     ORDER BY last_verified_at ASC NULLS FIRST
     LIMIT ?
   `).all(email, twoHoursAgo, limit)
 }
-
 export function markDeleted(id) {
   const now = Math.floor(Date.now() / 1000)
   db.prepare(`UPDATE uploads SET deleted_at = ?, last_verified_at = ?, updated_at = strftime('%s','now') WHERE id = ?`).run(now, now, id)
 }
-
 export function markVerified(id) {
   const now = Math.floor(Date.now() / 1000)
   db.prepare(`UPDATE uploads SET last_verified_at = ?, updated_at = strftime('%s','now') WHERE id = ?`).run(now, id)
 }
-
 export function purgeOldDeleted(email) {
   const fifteenDaysAgo = Math.floor(Date.now() / 1000) - 15 * 24 * 3600
   const result = db.prepare(`DELETE FROM uploads WHERE google_email = ? AND deleted_at IS NOT NULL AND deleted_at < ?`).run(email, fifteenDaysAgo)
   if (result.changes > 0) console.log(`[db] purged ${result.changes} rows deleted >15 days ago for ${email}`)
 }
-
 export function getDeletedUploads(email) {
   return db.prepare(`SELECT * FROM uploads WHERE google_email = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`).all(email)
 }
-
 export function getActiveUserEmails() {
   return db.prepare(`SELECT DISTINCT google_email FROM sessions WHERE google_email IS NOT NULL`).all().map(r => r.google_email)
 }
 
+// ── Scope / Quota ─────────────────────────────────────────────────────────────
 export function setNeedsReauthScope(email, value) {
   db.prepare(`UPDATE sessions SET needs_reauth_scope = ? WHERE google_email = ?`).run(value ? 1 : 0, email)
 }
-
 export function getNeedsReauthScope(sessionId) {
   const row = db.prepare('SELECT needs_reauth_scope FROM sessions WHERE session_id = ?').get(sessionId)
   return row ? !!row.needs_reauth_scope : false
 }
-
-// ── Quota log ─────────────────────────────────────────────────────────────────
-
 export function incrementQuotaLog(calls = 1) {
   const date = new Date().toISOString().slice(0, 10)
   db.prepare(`
-    INSERT INTO quota_log (date, api_calls, updated_at)
-    VALUES (?, ?, strftime('%s','now'))
-    ON CONFLICT(date) DO UPDATE SET
-      api_calls = api_calls + excluded.api_calls,
-      updated_at = strftime('%s','now')
+    INSERT INTO quota_log (date, api_calls, updated_at) VALUES (?, ?, strftime('%s','now'))
+    ON CONFLICT(date) DO UPDATE SET api_calls = api_calls + excluded.api_calls, updated_at = strftime('%s','now')
   `).run(date, calls)
 }
-
 export function getQuotaToday() {
   const date = new Date().toISOString().slice(0, 10)
   const row = db.prepare('SELECT api_calls FROM quota_log WHERE date = ?').get(date)

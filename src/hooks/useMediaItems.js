@@ -1,17 +1,26 @@
-// useMediaItems.js — v2.5
-// PURPOSE: Picker session lifecycle + upload pipeline management.
-// v2.5: mapReadyItem now passes isLivePhoto through from backend rowToItem,
-//   so GridView can show the Live Photo badge and SwipeCard can label them.
-//   No other logic changes.
-// v2.4: fetches /api/uploads/deleted on mount alongside all uploads.
-// v2.3: fires dupeToast on duplicate detection during upload polling.
+// useMediaItems.js — v2.6
+// PURPOSE: Picker session lifecycle + upload pipeline + curation session mgmt.
+// v2.6 changes:
+//   - reloadFromBackend(): re-fetches /api/uploads/all (now session-scoped on
+//     backend) + /api/uploads/deleted, resets store items. Used after session
+//     switch so grid reflects the newly active session without page reload.
+//   - clearAndReset() now calls POST /api/curation-sessions/start-new instead
+//     of /api/cleanup, which: saves the current session name (no-op, already
+//     named), creates a fresh curation session, marks it active. Frontend then
+//     resets store to empty. Old photos are preserved in their named session
+//     and accessible via SessionMenu.
+//   - Exposes reloadFromBackend + startNewSession for App/GridView to use.
+// v2.5: mapReadyItem passes isLivePhoto.
+// v2.4: fetches /api/uploads/deleted on mount.
+// v2.3: dupeToast on duplicate detection.
 
 import { useCallback, useEffect, useRef } from 'react'
 import {
   createPickerSession, getPickerSession,
   fetchPickerItems, deletePickerSession,
   startUpload, getUploadStatus, getReadyUploads,
-  getUploadQueue, getAllUploads, getDeletedUploads, cleanupSession,
+  getUploadQueue, getAllUploads, getDeletedUploads,
+  startNewCurationSession,
 } from '../lib/backendApi.js'
 import { savePickerSession, getPickerSession as getStoredPickerSession, clearItemsCache, saveLastItem } from '../lib/storage.js'
 import { PICKER_POLL_MS } from '../lib/config.js'
@@ -27,7 +36,7 @@ function mapReadyItem(r) {
     pickerItemId:   r.pickerItemId,
     filename:       r.filename,
     isDuplicate:    r.isDuplicate,
-    isLivePhoto:    r.isLivePhoto || false,   // v2.5: Live Photo flag
+    isLivePhoto:    r.isLivePhoto || false,
     swipeDecision:  r.swipeDecision || null,
     mediaMetadata: {
       creationTime: r.exif?.dateTaken || null,
@@ -44,6 +53,7 @@ export function useMediaItems() {
     appendItems, setPickerState, setPickerError,
     setView, authState, setUploadStatus,
     setItems, setSwipeDecisions, setDeletedItems, setQueueItems,
+    showDupeToast, hideDupeToast,
   } = useAppStore()
 
   const pollRef             = useRef(null)
@@ -57,6 +67,32 @@ export function useMediaItems() {
   const stopPolling       = useCallback(() => { if (pollRef.current)       { clearInterval(pollRef.current);       pollRef.current = null       } }, [])
   const stopUploadPolling = useCallback(() => { if (uploadPollRef.current) { clearInterval(uploadPollRef.current); uploadPollRef.current = null } }, [])
 
+  // ── Backend restore ────────────────────────────────────────────────────────
+  // Fetches active-session uploads + deleted items, resets store.
+  // Called on mount AND after session switch.
+  const reloadFromBackend = useCallback(async () => {
+    try {
+      const [allItems, deletedRaw] = await Promise.all([getAllUploads(), getDeletedUploads()])
+      if (allItems.length > 0) {
+        const mapped = allItems.map(mapReadyItem)
+        setItems(mapped)
+        const decisions = {}
+        for (const item of mapped) if (item.swipeDecision) decisions[item.id] = item.swipeDecision
+        setSwipeDecisions(decisions)
+        setPickerState('done')
+        console.log(`[mount] restored ${mapped.length} uploads from active session`)
+      } else {
+        setItems([])
+        setSwipeDecisions({})
+        setPickerState('idle')
+      }
+      if (deletedRaw.length > 0) setDeletedItems(deletedRaw.map(mapReadyItem))
+    } catch (err) {
+      console.error('[reloadFromBackend] failed:', err.message)
+    }
+  }, [setItems, setSwipeDecisions, setPickerState, setDeletedItems])
+
+  // ── Upload polling ─────────────────────────────────────────────────────────
   const startUploadPolling = useCallback((pickerSessionId, append) => {
     stopUploadPolling()
     if (!append) seenReadyIdsRef.current = new Set()
@@ -92,7 +128,6 @@ export function useMediaItems() {
           appendItems(mapped)
           const dupeCount = newOnes.filter(r => r.isDuplicate).length
           if (dupeCount > 0) {
-            const { showDupeToast, hideDupeToast } = useAppStore.getState()
             showDupeToast(dupeCount)
             setTimeout(() => hideDupeToast(), 5000)
           }
@@ -110,8 +145,9 @@ export function useMediaItems() {
         console.error('[Upload] status poll error:', err.message)
       }
     }, UPLOAD_POLL_MS)
-  }, [stopUploadPolling, appendItems, setUploadStatus])
+  }, [stopUploadPolling, appendItems, setUploadStatus, setQueueItems, showDupeToast, hideDupeToast])
 
+  // ── Picker session flow ───────────────────────────────────────────────────
   const loadPickerItems = useCallback(async (sessionId, append) => {
     setPickerState('loading')
     try {
@@ -120,7 +156,6 @@ export function useMediaItems() {
       savePickerSession(null)
       sessionRef.current = null
       popupRef.current?.close()
-
       setPickerState('uploading')
       const { enqueued } = await startUpload(sessionId, pickerItems)
       console.log(`[Upload] enqueued ${enqueued} items`)
@@ -175,50 +210,36 @@ export function useMediaItems() {
       if (!popupRef.current) setPickerError(`POPUP_BLOCKED:${session.pickerUri}`)
       setPickerState('waiting')
       startPolling(session.id, append)
-    } catch (err) {
-      setPickerError(err.message); setPickerState('idle')
-    }
+    } catch (err) { setPickerError(err.message); setPickerState('idle') }
   }, [startPolling, setPickerState, setPickerError])
 
-  // On mount: restore all uploads + deleted items from backend
+  // ── Start New Session ──────────────────────────────────────────────────────
+  // Saves the current session (already named on backend — no rename needed),
+  // creates a fresh curation session on backend, resets frontend store.
+  const startNewSession = useCallback(async () => {
+    stopPolling(); stopUploadPolling()
+    popupRef.current?.close()
+    savePickerSession(null); saveLastItem(null)
+    clearAuthedImageCache()
+    seenReadyIdsRef.current = new Set()
+    try {
+      await startNewCurationSession()
+    } catch (err) {
+      console.warn('[startNewSession] backend call failed (non-fatal):', err.message)
+    }
+    useAppStore.getState().resetItems()
+    clearItemsCache()
+  }, [stopPolling, stopUploadPolling])
+
+  // ── On mount: restore active session ──────────────────────────────────────
   useEffect(() => {
     if (authState !== 'authenticated') return
     ;(async () => {
-      try {
-        const [allItems, deletedRaw] = await Promise.all([
-          getAllUploads(),
-          getDeletedUploads(),
-        ])
-        if (allItems.length > 0) {
-          const mapped = allItems.map(mapReadyItem)
-          setItems(mapped)
-          const decisions = {}
-          for (const item of mapped) if (item.swipeDecision) decisions[item.id] = item.swipeDecision
-          setSwipeDecisions(decisions)
-          setPickerState('done')
-          console.log(`[mount] restored ${mapped.length} uploads from backend`)
-        }
-        if (deletedRaw.length > 0) {
-          setDeletedItems(deletedRaw.map(mapReadyItem))
-          console.log(`[mount] restored ${deletedRaw.length} deleted items`)
-        }
-      } catch (err) {
-        console.error('[mount] restore failed:', err.message)
-      }
+      await reloadFromBackend()
       const pending = getStoredPickerSession()
       if (pending) { sessionRef.current = pending; startPolling(pending, true) }
     })()
-  }, [authState])
-
-  const clearAndReset = useCallback(async () => {
-    stopPolling(); stopUploadPolling()
-    popupRef.current?.close()
-    clearItemsCache(); saveLastItem(null); savePickerSession(null)
-    clearAuthedImageCache()
-    seenReadyIdsRef.current = new Set()
-    try { await cleanupSession() } catch (err) { console.warn('[clearAndReset] cleanup failed:', err.message) }
-    useAppStore.getState().resetItems()
-  }, [stopPolling, stopUploadPolling])
+  }, [authState])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const cancelPickerSession = useCallback(() => {
     stopPolling(); stopUploadPolling()
@@ -233,7 +254,9 @@ export function useMediaItems() {
   const { items, pickerState, uploadStatus } = useAppStore()
   return {
     items, pickerState, uploadStatus,
-    startPickerSession, clearAndReset, cancelPickerSession,
+    startPickerSession, cancelPickerSession,
+    startNewSession,
+    reloadFromBackend,   // exposed for SessionMenu onSessionSwitch
     loading: ['creating','loading','uploading'].includes(pickerState),
   }
 }

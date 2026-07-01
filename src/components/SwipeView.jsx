@@ -1,9 +1,11 @@
-// SwipeView.jsx — v2.4
+// SwipeView.jsx — v2.5
 // PURPOSE: Swipe interface card stack.
-// v2.3: uses activeItems from useSwipeActions (respects album filter +
-// sort order). Passes item.id for local thumb URLs.
-// v2.4: replaced black screen / SwipeSummary with an "All done ✓" overlay
-// that auto-redirects to gallery after 2 seconds.
+// Changelog:
+//   v2.5: Passes showShortcuts + onToggleShortcuts to SwipeHUD for ? overlay.
+//         Keyboard shortcuts now handled at window level in useSwipeActions —
+//         SwipeCard arrow key handler kept as fallback for card-focus users.
+//   v2.4: "All done ✓" overlay with auto-redirect instead of SwipeSummary.
+//   v2.3: uses activeItems from useSwipeActions (respects album filter + sort order).
 
 import React, { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -19,10 +21,14 @@ const PRELOAD_AHEAD = 3
 
 export default function SwipeView() {
   const { setView } = useAppStore()
-  const { swipeRight, swipeLeft, swipeUp, swipeDown, currentIndex, total, writeError, pendingCount, activeItems } = useSwipeActions()
+  const {
+    swipeRight, swipeLeft, swipeUp, swipeDown,
+    currentIndex, total, writeError, pendingCount,
+    activeItems, showShortcuts, setShowShortcuts,
+  } = useSwipeActions()
   const [showDone, setShowDone] = useState(false)
 
-  // Detect stack exhaustion and trigger "All done" → auto-return
+  // Detect stack exhaustion → "All done" → auto-return to gallery
   const isDone = activeItems.length > 0 && currentIndex >= activeItems.length
   useEffect(() => {
     if (!isDone) return
@@ -31,6 +37,7 @@ export default function SwipeView() {
     return () => clearTimeout(t)
   }, [isDone, setView])
 
+  // Preload upcoming cards
   useEffect(() => {
     for (let i = currentIndex + 1; i <= currentIndex + PRELOAD_AHEAD; i++) {
       if (activeItems[i]?.id) preloadAuthedMediaItem(activeItems[i].id, IMG_SIZES.preload)
@@ -39,11 +46,9 @@ export default function SwipeView() {
 
   const currentItem = activeItems[currentIndex]
   const nextItem    = activeItems[currentIndex + 1]
-
   const bgSrc   = useAuthedMediaItemUrl(currentItem?.id, IMG_SIZES.thumb)
   const nextSrc = useAuthedMediaItemUrl(nextItem?.id, IMG_SIZES.full)
 
-  // "All done" fullscreen overlay — shown for 2s then auto-redirects
   if (showDone) {
     return (
       <motion.div
@@ -95,6 +100,8 @@ export default function SwipeView() {
         hasPrev={currentIndex > 0}
         writeError={writeError}
         pendingCount={pendingCount}
+        showShortcuts={showShortcuts}
+        onToggleShortcuts={() => setShowShortcuts(v => !v)}
       />
     </div>
   )

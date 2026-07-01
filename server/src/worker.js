@@ -1,5 +1,11 @@
-// worker.js — v2.3
+// worker.js — v2.4
 // PURPOSE: Download → Live Photo probe → dedup → EXIF → thumbnail → re-upload pipeline.
+// v2.4 changes:
+//   - getOrCreateDuplicatesAlbum now self-heals on a stale cached album_id.
+//     If createMediaItem fails with a 404 (Google's gRPC NOT_FOUND code 5,
+//     surfaced as .status=404 by library-upload.js v2.4) because the
+//     Duplicates album was deleted on Google's side, the stale user_albums
+//     row is cleared and the album is recreated under the same title.
 // v2.3 changes:
 //   - Live Photo detection: after downloading still, probe baseUrl=dv for MOV component.
 //     If video/quicktime returned (>10KB), mux JPEG/HEIC + MOV into a single
@@ -21,7 +27,7 @@ import { probeLivePhoto, muxLivePhoto } from './live-photo.js'
 import {
   db, updateUploadStatus, incrementRetryCount, getUploadRow,
   findDuplicateByHash, getPendingUploads, getSession,
-  getCachedAlbumId, setCachedAlbumId, incrementQuotaLog,
+  getCachedAlbumId, setCachedAlbumId, deleteCachedAlbumId, incrementQuotaLog,
 } from './db.js'
 
 const MAX_CONCURRENT      = 4
@@ -46,6 +52,19 @@ async function getOrCreateDuplicatesAlbum(sessionId) {
   const accessToken = await getValidAccessToken(sessionId)
   const album = await createAlbum(accessToken, DUPLICATES_ALBUM_TITLE)
   if (email) setCachedAlbumId(email, DUPLICATES_ALBUM_TITLE, album.id)
+  return album.id
+}
+
+// v2.4: forces a fresh Duplicates album regardless of cache — self-healing
+// after a 404 (cached album_id no longer exists on Google's side).
+async function recreateDuplicatesAlbum(sessionId) {
+  const session = getSession(sessionId)
+  const email   = session?.google_email || null
+  if (email) deleteCachedAlbumId(email, DUPLICATES_ALBUM_TITLE)
+  const accessToken = await getValidAccessToken(sessionId)
+  const album = await createAlbum(accessToken, DUPLICATES_ALBUM_TITLE)
+  if (email) setCachedAlbumId(email, DUPLICATES_ALBUM_TITLE, album.id)
+  console.warn(`[worker] stale album_id detected for "${DUPLICATES_ALBUM_TITLE}" — recreated as ${album.id}`)
   return album.id
 }
 
@@ -134,7 +153,19 @@ async function processOne(row, { sessionId, albumIdForUploads }) {
       // Fresh upload (not reusing dup's our_media_item_id — would be rejected by Google)
       const uploadToken = await uploadBytes(accessToken, uploadBuffer, row.filename, uploadMime)
       incrementQuotaLog(1)
-      const mediaItem = await serializedCreateMediaItem(accessToken, uploadToken, row.filename, dupAlbumId)
+
+      // v2.4: self-heal on 404 — cached Duplicates album_id is stale
+      let mediaItem
+      try {
+        mediaItem = await serializedCreateMediaItem(accessToken, uploadToken, row.filename, dupAlbumId)
+      } catch (err) {
+        if (err.status === 404) {
+          const freshAlbumId = await recreateDuplicatesAlbum(sessionId)
+          mediaItem = await serializedCreateMediaItem(accessToken, uploadToken, row.filename, freshAlbumId)
+        } else {
+          throw err
+        }
+      }
       incrementQuotaLog(1)
 
       updateUploadStatus(row.id, 'done', {
