@@ -1,4 +1,4 @@
-// SwipeCard.jsx — v2.3
+// SwipeCard.jsx — v2.4
 // PURPOSE: Draggable swipe card for the current photo.
 // v2.3: removed local onKeyDown handler (handleKey + tabIndex). It mapped
 // ArrowRight→Good / ArrowLeft→Bad, which conflicts with the new window-level
@@ -61,6 +61,17 @@ export default function SwipeCard({ item, onSwipeRight, onSwipeLeft, onSwipeUp, 
         ? <img src={src} alt={item.filename || ''} className={styles.photo} draggable={false} onError={() => console.error('[Image] failed:', src?.slice(0,80))}/>
         : <div className={styles.photo} style={{ background:'var(--bg-3)' }}/>}
       <div className={styles.topGradient}/><div className={styles.bottomGradient}/>
+      {/* v2.4: media type badge top-left */}
+      {item.isLivePhoto && (
+        <div className={`${styles.mediaBadge} ${styles.mediaBadgeLive}`}>
+          <span className={styles.mediaBadgeIcon}>◎</span>Live
+        </div>
+      )}
+      {item.mediaMetadata?.video && !item.isLivePhoto && (
+        <div className={`${styles.mediaBadge} ${styles.mediaBadgeVideo}`}>
+          <span className={styles.mediaBadgeIcon}>▶</span>Video
+        </div>
+      )}
       <motion.div className={`${styles.label} ${styles.good}`} style={{ opacity:goodOpacity }}>✓ Good</motion.div>
       <motion.div className={`${styles.label} ${styles.bad}`}  style={{ opacity:badOpacity  }}>✕ Bad</motion.div>
       <motion.div className={`${styles.label} ${styles.skip}`} style={{ opacity:skipOpacity }}>↑ Skip</motion.div>

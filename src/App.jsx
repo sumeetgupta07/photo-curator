@@ -1,4 +1,4 @@
-// App.jsx — v2.4
+// App.jsx — v2.5
 // PURPOSE: Root app shell — auth gate, view switcher, global overlay layer.
 // v2.4: Added SessionMenu sheet. startNewSession + reloadFromBackend passed
 //       from useMediaItems. clearAndReset removed — replaced by startNewSession.
@@ -14,10 +14,8 @@ import LoginScreen from './components/LoginScreen.jsx'
 import GridView from './components/GridView.jsx'
 import SwipeView from './components/SwipeView.jsx'
 import LoadingScreen from './components/LoadingScreen.jsx'
-import DebugPanel from './components/DebugPanel.jsx'
 import QueueDrawer from './components/QueueDrawer.jsx'
 import SessionMenu from './components/SessionMenu.jsx'
-
 function ReauthBanner({ onSignOut }) {
   const [show, setShow] = useState(false)
   const { authState } = useAppStore()
@@ -119,7 +117,6 @@ export default function App() {
 
       <DupeToast />
       <QueueDrawer />
-      <DebugPanel />
     </>
   )
 }

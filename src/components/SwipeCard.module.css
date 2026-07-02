@@ -11,3 +11,9 @@
 .meta { position:absolute; bottom:20px; left:20px; right:20px; display:flex; flex-direction:column; gap:2px; pointer-events:none; }
 .metaDate { font-size:14px; font-weight:500; color:rgba(255,255,255,0.9); }
 .metaName { font-size:11px; color:rgba(255,255,255,0.5); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* v2.4: media type badge — top-left pill, consistent with grid badges */
+.mediaBadge { position:absolute; top:16px; left:16px; display:flex; align-items:center; gap:4px; padding:3px 8px; border-radius:100px; font-size:10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; pointer-events:none; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,0.18); }
+.mediaBadgeLive  { background:rgba(0,0,0,0.45); color:rgba(255,255,255,0.95); }
+.mediaBadgeVideo { background:rgba(0,0,0,0.45); color:rgba(255,255,255,0.95); }
+.mediaBadgeIcon  { font-size:9px; line-height:1; }

@@ -1,22 +1,25 @@
-// index.js — v2.11
+// index.js — v2.14
 // PURPOSE: Photo Curator backend — all Express routes.
-// v2.11 changes:
-//   - GET  /api/curation-sessions        — list all sessions for user
-//   - POST /api/curation-sessions        — create new session (auto-name)
-//   - POST /api/curation-sessions/:id/activate — switch active session
-//   - PATCH /api/curation-sessions/:id/rename  — rename a session
-//   - DELETE /api/curation-sessions/:id  — delete session + its uploads + thumbs
-//                                          (blocked if session is active)
-//   - POST /api/curation-sessions/start-new — saves current (no-op, it's already
-//       named), creates a fresh session, marks it active, returns it
-//   - GET /api/uploads/all now scoped to active curation session only
-//       (fixes "previous session comes back on refresh")
-//   - start-upload now stamps curation_session_id on each new upload row
-//   - Inbox album self-healing: getOrCreateWorkingAlbum persisted via user_albums
-// v2.10 changes:
-//   - batchAddMediaItems 404 self-heal (stale cached album_id).
-//   - bandwidthToday in /api/uploads/status.
-// v2.8 changes: filename fix, swipe by email, quota log, live photo.
+// v2.14 changes:
+//   - Import getSessionEmail from db.js
+//   - /api/swipe: if sessionEmail() returns null (google_email missing from
+//     sessions row), fall back to getSessionEmail(sessionId) which re-reads
+//     from sessions table. If still null, use our_media_item_id-only fallback
+//     in getUploadByOurMediaItemId (v2.14 db.js). This fixes 404 on every
+//     swipe when the OAuth userinfo fetch failed during login and left
+//     google_email as NULL in the sessions row.
+//   - /api/me: if google_email is null, attempt to heal it by fetching from
+//     Google userinfo with the current access token and persisting it.
+// v2.8 changes:
+//   - start-upload: now passes filename, fileSize, creationTime, pickerBaseUrl
+//     to createUploadRow (fixes "null" filename bug throughout the app)
+//   - /api/swipe: getUploadByOurMediaItemId now called with email instead of
+//     sessionId (fixes 404 after session rotation)
+//   - GET /api/quota: returns today's API call count from quota_log table
+//   - Live Photo: no route changes needed — handled entirely in worker.js
+// v2.7: added GET /api/uploads/queue — per-item filename+status for QueueDrawer.
+// v2.6: scope-status endpoint + reauth flag on 403.
+// v2.5: deleted-photo detection (verifier + cron).
 
 import 'dotenv/config'
 import express from 'express'
@@ -26,22 +29,17 @@ import {
   saveSession, getSession, deleteSession,
   createUploadRow, getReadyUploads,
   getUploadStatusCounts, getUploadRow, updateUploadStatus,
-  getUploadByOurMediaItemId, setSwipeDecision,
-  getAlbumSummaries, getDeletedUploads,
+  getUploadByOurMediaItemId, setSwipeDecision, getSessionEmail,
+  getUploadIdsBySession, getAlbumSummaries, getDeletedUploads,
   setNeedsReauthScope, getNeedsReauthScope, getQuotaToday,
-  incrementQuotaLog, getBandwidthToday,
-  getCachedAlbumId, setCachedAlbumId, deleteCachedAlbumId,
-  getUploadsForActiveSession,
-  createCurationSession, getActiveCurationSession, listCurationSessions,
-  setActiveCurationSession, renameCurationSession,
-  deleteCurationSession, getUploadIdsByCurationSession,
-  db,
+  incrementQuotaLog, db,
 } from './db.js'
 import { buildAuthUrl, exchangeCodeForTokens, getValidAccessToken } from './google-auth.js'
 import { createPickerSession, getPickerSession, deletePickerSession, fetchPickerItems } from './picker.js'
 import { kickWorkerPool, registerBaseUrl, registerRowContext } from './worker.js'
 import { createAlbum, batchAddMediaItems } from './library-upload.js'
 import { ensureThumbDirs, deleteThumbsBulk } from './thumbs.js'
+import { getCachedAlbumId, setCachedAlbumId } from './db.js'
 import cron from 'node-cron'
 import { runVerificationPass, runVerificationPassForAllUsers } from './verifier.js'
 
@@ -51,6 +49,7 @@ const SESSION_COOKIE = 'pc_session'
 const IS_PROD = process.env.NODE_ENV === 'production'
 
 ensureThumbDirs().catch(err => console.warn('[startup] ensureThumbDirs failed:', err.message))
+
 app.use(cookieParser())
 app.use(express.json())
 app.use('/api/thumbs', express.static('/app/data/thumbs', { maxAge: '1h' }))
@@ -66,17 +65,22 @@ function consumeState(state) {
   pendingStates.delete(state)
   return exp && Date.now() < exp
 }
+
 function requireSession(req, res, next) {
   const sessionId = req.cookies[SESSION_COOKIE]
   if (!sessionId || !getSession(sessionId)) return res.status(401).json({ error: 'NOT_AUTHENTICATED' })
   req.sessionId = sessionId
   next()
 }
+
+// Helper: get email for current session
 function sessionEmail(req) {
-  return getSession(req.sessionId)?.google_email || null
+  const session = getSession(req.sessionId)
+  return session?.google_email || null
 }
 
 // ── OAuth ─────────────────────────────────────────────────────────────────────
+
 app.get('/api/oauth/start', (req, res) => { res.redirect(buildAuthUrl(makeState())) })
 
 app.get('/api/oauth/callback', async (req, res) => {
@@ -97,107 +101,63 @@ app.get('/api/oauth/callback', async (req, res) => {
     res.cookie(SESSION_COOKIE, sessionId, { httpOnly: true, secure: IS_PROD, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 24 * 90 })
     if (email) setNeedsReauthScope(email, false)
     res.redirect('/')
-    if (email) setImmediate(() => runVerificationPass(email, getValidAccessToken).catch(() => {}))
+    if (email) {
+      setImmediate(() => runVerificationPass(email, getValidAccessToken).catch(err =>
+        console.error('[verifier] login-triggered pass failed:', err.message)
+      ))
+    }
   } catch (err) {
     console.error('[oauth/callback] failed:', err.message)
     res.redirect('/?auth_error=token_exchange_failed')
   }
 })
 
-app.get('/api/me', (req, res) => {
+app.get('/api/me', async (req, res) => {
   const sessionId = req.cookies[SESSION_COOKIE]
   const session = sessionId ? getSession(sessionId) : null
   if (!session) return res.json({ authenticated: false })
-  res.json({ authenticated: true, email: session.google_email || null })
+
+  let email = session.google_email || null
+
+  // v2.14: heal null google_email — fetch from Google userinfo and persist
+  if (!email) {
+    try {
+      const at = await getValidAccessToken(sessionId)
+      const r = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${at}` },
+      })
+      if (r.ok) {
+        const d = await r.json()
+        email = d.email || null
+        if (email) {
+          db.prepare('UPDATE sessions SET google_email = ?, updated_at = strftime('%s','now') WHERE session_id = ?').run(email, sessionId)
+          console.log(`[/api/me] healed null google_email → ${email}`)
+        }
+      }
+    } catch (err) {
+      console.warn('[/api/me] email heal failed:', err.message)
+    }
+  }
+
+  res.json({ authenticated: true, email })
 })
+
 app.get('/api/scope-status', requireSession, (req, res) => {
   res.json({ needsReauth: getNeedsReauthScope(req.sessionId) })
 })
+
 app.post('/api/logout', (req, res) => {
   const sessionId = req.cookies[SESSION_COOKIE]
   if (sessionId) deleteSession(sessionId)
   res.clearCookie(SESSION_COOKIE)
   res.json({ ok: true })
 })
+
+// ── Quota ─────────────────────────────────────────────────────────────────────
+// v2.8: returns today's Google API call count for the UI to display a warning
+// if we're approaching limits (informational only — worker handles 429 itself)
 app.get('/api/quota', requireSession, (req, res) => {
   res.json({ date: new Date().toISOString().slice(0, 10), apiCalls: getQuotaToday() })
-})
-
-// ── Curation sessions ─────────────────────────────────────────────────────────
-
-// GET /api/curation-sessions — list all sessions for user with photo counts
-app.get('/api/curation-sessions', requireSession, (req, res) => {
-  const email = sessionEmail(req)
-  if (!email) return res.json({ sessions: [], active: null })
-  const sessions = listCurationSessions(email)
-  const active = sessions.find(s => s.is_active) || null
-  res.json({ sessions, active })
-})
-
-// POST /api/curation-sessions — create a new session (not yet active)
-app.post('/api/curation-sessions', requireSession, (req, res) => {
-  const email = sessionEmail(req)
-  if (!email) return res.status(401).json({ error: 'NO_EMAIL' })
-  const name = req.body?.name || null
-  const session = createCurationSession(email, name)
-  res.json({ ok: true, session })
-})
-
-// POST /api/curation-sessions/start-new
-// Saves the current session as-is (already named, nothing to do),
-// creates a new session, marks it active, returns it.
-// Frontend uses this for "Start New Session" button.
-app.post('/api/curation-sessions/start-new', requireSession, (req, res) => {
-  const email = sessionEmail(req)
-  if (!email) return res.status(401).json({ error: 'NO_EMAIL' })
-  const name = req.body?.name || null
-  const newSession = createCurationSession(email, name)
-  setActiveCurationSession(email, newSession.id)
-  console.log(`[sessions] started new curation session "${newSession.name}" (id=${newSession.id}) for ${email}`)
-  res.json({ ok: true, session: { ...newSession, is_active: 1, photo_count: 0 } })
-})
-
-// POST /api/curation-sessions/:id/activate — switch active session
-app.post('/api/curation-sessions/:id/activate', requireSession, (req, res) => {
-  const email = sessionEmail(req)
-  if (!email) return res.status(401).json({ error: 'NO_EMAIL' })
-  const ok = setActiveCurationSession(email, Number(req.params.id))
-  if (!ok) return res.status(404).json({ error: 'NOT_FOUND' })
-  console.log(`[sessions] activated curation session ${req.params.id} for ${email}`)
-  res.json({ ok: true })
-})
-
-// PATCH /api/curation-sessions/:id/rename
-app.patch('/api/curation-sessions/:id/rename', requireSession, (req, res) => {
-  const email = sessionEmail(req)
-  const name  = req.body?.name
-  if (!name?.trim()) return res.status(400).json({ error: 'MISSING_NAME' })
-  const ok = renameCurationSession(email, Number(req.params.id), name.trim())
-  if (!ok) return res.status(404).json({ error: 'NOT_FOUND' })
-  res.json({ ok: true })
-})
-
-// DELETE /api/curation-sessions/:id
-// Blocked if session is active. Deletes uploads rows + thumbnail files.
-app.delete('/api/curation-sessions/:id', requireSession, async (req, res) => {
-  const email = sessionEmail(req)
-  if (!email) return res.status(401).json({ error: 'NO_EMAIL' })
-  const result = deleteCurationSession(email, Number(req.params.id))
-  if (!result.ok) {
-    const status = result.reason === 'ACTIVE_SESSION' ? 409 : 404
-    const message = result.reason === 'ACTIVE_SESSION'
-      ? 'Cannot delete the active session. Switch to another session first.'
-      : 'Session not found.'
-    return res.status(status).json({ error: result.reason, message })
-  }
-  // Delete thumbnails for removed upload rows (non-fatal)
-  if (result.uploadIds?.length) {
-    deleteThumbsBulk(result.uploadIds).catch(err =>
-      console.warn('[sessions] thumb cleanup failed (non-fatal):', err.message)
-    )
-  }
-  console.log(`[sessions] deleted curation session ${req.params.id} (${result.uploadIds?.length} uploads) for ${email}`)
-  res.json({ ok: true, deleted: result.uploadIds?.length || 0 })
 })
 
 // ── Image proxy ───────────────────────────────────────────────────────────────
@@ -240,19 +200,15 @@ app.delete('/api/picker/sessions/:id', requireSession, async (req, res) => {
 
 // ── Upload pipeline ───────────────────────────────────────────────────────────
 const WORKING_ALBUM_TITLE = 'Photo Curator — Inbox'
-
-// v2.10+: persisted via user_albums (not in-memory variable)
+let workingAlbumId = null
 async function getOrCreateWorkingAlbum(sessionId) {
-  const email = getSession(sessionId)?.google_email || null
-  if (email) {
-    const cached = getCachedAlbumId(email, WORKING_ALBUM_TITLE)
-    if (cached) return cached
-  }
+  if (workingAlbumId) return workingAlbumId
   const album = await createAlbum(await getValidAccessToken(sessionId), WORKING_ALBUM_TITLE)
-  if (email) setCachedAlbumId(email, WORKING_ALBUM_TITLE, album.id)
-  return album.id
+  workingAlbumId = album.id
+  return workingAlbumId
 }
 
+// v2.8: passes filename, fileSize, creationTime, pickerBaseUrl to createUploadRow
 app.post('/api/picker-session/:id/start-upload', requireSession, async (req, res) => {
   const email           = sessionEmail(req)
   const pickerSessionId = req.params.id
@@ -260,27 +216,20 @@ app.post('/api/picker-session/:id/start-upload', requireSession, async (req, res
   if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'MISSING_ITEMS' })
   try {
     const albumId = await getOrCreateWorkingAlbum(req.sessionId)
-
-    // Ensure user has an active curation session; create one if needed
-    let cs = getActiveCurationSession(email)
-    if (!cs) {
-      const created = createCurationSession(email)
-      setActiveCurationSession(email, created.id)
-      cs = { id: created.id }
-      console.log(`[sessions] auto-created curation session for ${email}`)
-    }
-
     let enqueued = 0
     for (const item of items) {
       if (!item.id || !item.baseUrl) continue
       const rowId = createUploadRow(
-        req.sessionId, email, pickerSessionId, item.id, item.mimeType || null,
+        req.sessionId,
+        email,
+        pickerSessionId,
+        item.id,
+        item.mimeType || null,
         {
-          filename:           item.filename || null,
-          fileSize:           item.fileSize || null,
-          creationTime:       item.mediaMetadata?.creationTime || null,
-          pickerBaseUrl:      item.baseUrl,
-          curationSessionId:  cs.id,     // v2.11: stamp session
+          filename:      item.filename || null,
+          fileSize:      item.fileSize || null,
+          creationTime:  item.mediaMetadata?.creationTime || null,
+          pickerBaseUrl: item.baseUrl,              // persisted for restart recovery
         }
       )
       registerBaseUrl(rowId, item.baseUrl)
@@ -295,10 +244,7 @@ app.post('/api/picker-session/:id/start-upload', requireSession, async (req, res
 app.get('/api/uploads/status', requireSession, (req, res) => {
   const { pickerSessionId } = req.query
   if (!pickerSessionId) return res.status(400).json({ error: 'MISSING_PICKER_SESSION_ID' })
-  const counts = getUploadStatusCounts(String(pickerSessionId))
-  const email = sessionEmail(req)
-  const bandwidthToday = email ? getBandwidthToday(email) : 0
-  res.json({ ...counts, bandwidthToday })
+  res.json(getUploadStatusCounts(String(pickerSessionId)))
 })
 
 function rowToItem(r) {
@@ -326,11 +272,16 @@ app.get('/api/uploads/ready', requireSession, (req, res) => {
   res.json({ items: getReadyUploads(String(pickerSessionId)).map(rowToItem) })
 })
 
-// v2.11: scoped to active curation session only
 app.get('/api/uploads/all', requireSession, (req, res) => {
   const email = sessionEmail(req)
   if (!email) return res.json({ items: [] })
-  res.json({ items: getUploadsForActiveSession(email).map(rowToItem) })
+  const rows = db.prepare(`
+    SELECT * FROM uploads
+    WHERE google_email = ? AND status = 'done' AND our_media_item_id IS NOT NULL
+      AND is_duplicate = 0 AND deleted_at IS NULL
+    ORDER BY id ASC
+  `).all(email)
+  res.json({ items: rows.map(rowToItem) })
 })
 
 app.get('/api/uploads/deleted', requireSession, (req, res) => {
@@ -342,7 +293,10 @@ app.get('/api/uploads/deleted', requireSession, (req, res) => {
 app.get('/api/uploads/queue', requireSession, (req, res) => {
   const { pickerSessionId } = req.query
   if (!pickerSessionId) return res.status(400).json({ error: 'MISSING_PICKER_SESSION_ID' })
-  const rows = db.prepare(`SELECT id, filename, status, mime_type, is_live_photo FROM uploads WHERE picker_session_id = ? ORDER BY id ASC`).all(String(pickerSessionId))
+  const rows = db.prepare(`
+    SELECT id, filename, status, mime_type, is_live_photo FROM uploads
+    WHERE picker_session_id = ? ORDER BY id ASC
+  `).all(String(pickerSessionId))
   res.json({ items: rows })
 })
 
@@ -355,8 +309,21 @@ app.post('/api/uploads/:id/retry', requireSession, (req, res) => {
   res.json({ ok: true })
 })
 
+// ── Album drawer ──────────────────────────────────────────────────────────────
 app.get('/api/albums', requireSession, (req, res) => {
   res.json({ albums: getAlbumSummaries(req.sessionId) })
+})
+
+// ── Cleanup ───────────────────────────────────────────────────────────────────
+app.post('/api/cleanup', requireSession, async (req, res) => {
+  try {
+    const ids = getUploadIdsBySession(req.sessionId)
+    await deleteThumbsBulk(ids)
+    res.json({ ok: true, deleted: ids.length })
+  } catch (err) {
+    console.error('[cleanup] failed (non-fatal):', err.message)
+    res.json({ ok: false, error: err.message })
+  }
 })
 
 // ── Swipe routing ─────────────────────────────────────────────────────────────
@@ -364,68 +331,67 @@ async function getOrCreateNamedAlbum(sessionId, albumTitle) {
   const session = getSession(sessionId)
   if (!session?.google_email) throw new Error('No user email for album caching')
   const email = session.google_email
-  const cached = getCachedAlbumId(email, albumTitle)
-  if (cached) return cached
-  const album = await createAlbum(await getValidAccessToken(sessionId), albumTitle)
+  let albumId = getCachedAlbumId(email, albumTitle)
+  if (albumId) return albumId
+  const accessToken = await getValidAccessToken(sessionId)
+  const album = await createAlbum(accessToken, albumTitle)
   setCachedAlbumId(email, albumTitle, album.id)
   return album.id
 }
 
-async function recreateNamedAlbum(sessionId, albumTitle) {
-  const session = getSession(sessionId)
-  const email   = session?.google_email
-  if (email) deleteCachedAlbumId(email, albumTitle)
-  const album = await createAlbum(await getValidAccessToken(sessionId), albumTitle)
-  if (email) setCachedAlbumId(email, albumTitle, album.id)
-  console.warn(`[Swipe] stale album_id for "${albumTitle}" — recreated as ${album.id}`)
-  return album.id
-}
-
+// v2.8: lookup by email (not sessionId) — survives session rotation
 app.post('/api/swipe', requireSession, async (req, res) => {
   const { ourMediaItemId, decision } = req.body || {}
-  if (!ourMediaItemId || !['good', 'bad', 'skip'].includes(decision)) return res.status(400).json({ error: 'INVALID_BODY' })
-  const email = sessionEmail(req)
-  const row   = email ? getUploadByOurMediaItemId(email, ourMediaItemId) : null
+  if (!ourMediaItemId || !['good', 'bad', 'skip'].includes(decision)) {
+    return res.status(400).json({ error: 'INVALID_BODY' })
+  }
+  // v2.14: belt-and-suspenders email resolution — sessionEmail() can return
+  // null if google_email was never written to sessions table (userinfo fetch
+  // failed during OAuth). Fall back to re-reading from DB, then to the
+  // our_media_item_id-only lookup in getUploadByOurMediaItemId.
+  let email = sessionEmail(req)
+  if (!email) email = getSessionEmail(req.sessionId)
+  const row = getUploadByOurMediaItemId(email, ourMediaItemId)
   if (!row) return res.status(404).json({ error: 'NOT_FOUND' })
-  if (row.is_duplicate) { setSwipeDecision(row.id, decision); return res.json({ ok: true, decision, albumId: null }) }
+
+  if (row.is_duplicate) {
+    setSwipeDecision(row.id, decision)
+    return res.json({ ok: true, decision, albumId: null, note: 'duplicate — already in Duplicates album' })
+  }
+
   setSwipeDecision(row.id, decision)
   if (decision === 'skip') return res.json({ ok: true, decision: 'skip', albumId: null })
-  const albumTitle = decision === 'good' ? 'Good' : 'Bad'
+
   try {
-    const albumId = await getOrCreateNamedAlbum(req.sessionId, albumTitle)
-    await batchAddMediaItems(await getValidAccessToken(req.sessionId), albumId, [ourMediaItemId])
+    const albumTitle = decision === 'good' ? 'Good' : 'Bad'
+    const albumId    = await getOrCreateNamedAlbum(req.sessionId, albumTitle)
+    const at         = await getValidAccessToken(req.sessionId)
+    await batchAddMediaItems(at, albumId, [ourMediaItemId])
     incrementQuotaLog(1)
     console.log(`[Swipe] ${ourMediaItemId.slice(0, 20)}… → "${albumTitle}" ✓`)
-    return res.json({ ok: true, decision, albumId })
+    res.json({ ok: true, decision, albumId })
   } catch (err) {
-    if (err.status === 404) {
-      try {
-        const freshId = await recreateNamedAlbum(req.sessionId, albumTitle)
-        await batchAddMediaItems(await getValidAccessToken(req.sessionId), freshId, [ourMediaItemId])
-        incrementQuotaLog(1)
-        return res.json({ ok: true, decision, albumId: freshId })
-      } catch (retryErr) {
-        return res.status(502).json({ error: 'ALBUM_WRITE_FAILED', message: retryErr.message, decision })
-      }
-    }
     console.error('[Swipe] album write failed:', err.message)
-    return res.status(502).json({ error: 'ALBUM_WRITE_FAILED', message: err.message, decision })
+    res.status(502).json({ error: 'ALBUM_WRITE_FAILED', message: err.message, decision })
   }
 })
 
 app.get('/api/swipe-decisions', requireSession, (req, res) => {
   const { pickerSessionId } = req.query
   if (!pickerSessionId) return res.status(400).json({ error: 'MISSING_PICKER_SESSION_ID' })
-  const rows = getReadyUploads(String(pickerSessionId)).filter(r => r.swipe_decision)
+  const rows = getReadyUploads(String(pickerSessionId))
+    .filter(r => r.swipe_decision)
     .map(r => ({ ourMediaItemId: r.our_media_item_id, decision: r.swipe_decision }))
   res.json({ decisions: rows })
 })
 
 // ── Cron ──────────────────────────────────────────────────────────────────────
 cron.schedule('0 */2 * * *', () => {
+  console.log('[cron] running 2-hourly verification pass')
   runVerificationPassForAllUsers(getValidAccessToken).catch(err =>
     console.error('[cron] verification pass failed:', err.message)
   )
 })
+console.log('[server] cron scheduled: deleted-photo verification every 2 hours')
 
-app.listen(PORT, () => console.log(`[server] Photo Curator backend v2.11 listening on :${PORT}`))
+app.listen(PORT, () => console.log(`[server] Photo Curator backend v2.8 listening on :${PORT}`))

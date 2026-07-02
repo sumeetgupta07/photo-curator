@@ -220,8 +220,8 @@ function GridThumb({ item, onOpen, swipeDecisions, processedIds }) {
         ? <img src={src} alt={item.filename||''} className={styles.thumbImg} loading="lazy" onError={e => { e.target.style.opacity='0.3' }}/>
         : <div className={styles.thumbImg} style={{ background:'var(--bg-3)' }}/>
       }
-      {item.isLivePhoto && <div className={styles.livePhotoBadge}>◎</div>}
-      {item.mediaMetadata?.video && !item.isLivePhoto && <div className={styles.videoIcon}>▶</div>}
+      {item.isLivePhoto && <div className={styles.livePhotoBadge}><span className={styles.badgeIcon}>◎</span>Live</div>}
+      {item.mediaMetadata?.video && !item.isLivePhoto && <div className={styles.videoIcon}><span className={styles.badgeIcon}>▶</span>Video</div>}
       <AlbumDot decision={decision} />
     </motion.button>
   )
